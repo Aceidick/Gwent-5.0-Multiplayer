@@ -1194,7 +1194,15 @@ class Player {
         this.grave.reset();
         this.hand.reset();
         this.deck.reset();
+        // In online mode, each deck must shuffle from its own per-role RNG
+        // stream (deckHost/deckGuest) so both clients produce the same deck
+        // order for the same role regardless of which player initializes first.
+        let prevShuffleRole = (typeof mp !== "undefined") ? mp._shuffleRole : null;
+        if (typeof mp !== "undefined" && mp.active && this.mpRole)
+            mp._shuffleRole = this.mpRole;
         this.deck.initializeFromID(this.deck_data.cards, this);
+        if (typeof mp !== "undefined")
+            mp._shuffleRole = prevShuffleRole;
 
         this.health = 2;
         this.total = 0;
@@ -6106,6 +6114,19 @@ makePreview(index, num, container_elem, cards) {
             // Online PvP — both non-AI; remote player gets ControllerRemote in constructor
             player_me = new Player(0, "Player 1", me_deck, false);
             player_op = new Player(1, "Player 2", this.start_op_deck, false);
+            // Tag each player with its netplay role so deck shuffles use the
+            // correct per-role RNG stream (deckHost/deckGuest) and stay
+            // deterministic across both clients regardless of initialization
+            // order. Local player = our role, opponent = the other role.
+            if (typeof mp !== "undefined" && mp.active) {
+                player_me.mpRole = mp.role;
+                player_op.mpRole = (mp.role === "host") ? "guest" : "host";
+                // The Player constructors already initialized the decks via
+                // reset() with the game RNG stream (mpRole wasn't set yet).
+                // Re-initialize so each deck shuffles from its per-role stream.
+                player_me.reset();
+                player_op.reset();
+            }
         } else {
             // PVP
             player_me = new Player(0, "Player 1", me_deck, false);

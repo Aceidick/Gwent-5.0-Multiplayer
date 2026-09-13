@@ -3139,7 +3139,7 @@ omen: {
         
                 await card.animate("trade");
                 
-                let paymentRune = myRunes[Math.floor(Math.random() * myRunes.length)];
+                let paymentRune = myRunes[randomInt(myRunes.length)];
                 
                 if (typeof board !== "undefined" && typeof board.toHand === "function") {
                     paymentRune.holder = opponent;
