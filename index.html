@@ -60,14 +60,14 @@
         vertical-align: middle; 
     }
 
-        #front-buttons {
+        #play-mode-buttons {
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 14px;
             margin-top: 10px;
         }
-        .front-btn {
+        .play-mode-button {
             font-family: 'GwentCustom', serif;
             font-size: 1.15rem;
             letter-spacing: 1px;
@@ -81,9 +81,9 @@
             transition: filter 0.15s ease, transform 0.1s ease;
             filter: drop-shadow(2px 2px 2px rgba(0,0,0,0.8));
         }
-        .front-btn:hover { filter: brightness(1.25) drop-shadow(2px 2px 2px rgba(0,0,0,0.8)); }
-        .front-btn:active { transform: translateY(1px); }
-        #front-pvp { border-color: #b58f00; }
+        .play-mode-button:hover { filter: brightness(1.25) drop-shadow(2px 2px 2px rgba(0,0,0,0.8)); }
+        .play-mode-button:active { transform: translateY(1px); }
+        #button_start_friend { border-color: #b58f00; }
     </style>
 
 </head>
@@ -97,11 +97,10 @@
                 </span>
                 <br />
                 <font id="load_text">Loading v5.0...</font>
-                <div id="front-buttons" style="display:none">
-                    <button class="front-btn" id="front-pvc">Player vs Computer</button>
-                    <button class="front-btn" id="front-pvp">Player vs Player</button>
+                <div id="play-mode-buttons" style="display:none">
+                    <button class="start-game_class play-mode-button" id="button_start_computer" type="button">Player vs Computer</button>
+                    <button class="start-game_class play-mode-button" id="button_start_friend" type="button">Player vs Player</button>
                 </div>
-                <button class="start-game_class" id="button_start" style="display:none">LET'S PLAY</button>
                 <div id="version_text">v5.0</div>
             </div>
         </div>
@@ -388,21 +387,38 @@
                 <p>0</p>
             </div>
             <button id="start-game" class="start-game_class">Start game</button>
-            <button id="start-online-game" class="start-game_class">Online Multiplayer</button>
+            <button id="start-pvp-game" class="start-game_class">Online Multiplayer</button>
+        </section>
+
+        <section id="online-lobby" class="hide">
+          <div class="online-panel">
+            <h2>Online Multiplayer <small style="font-size:.45em">v1.3.1</small></h2>
+            <div id="online-room-code">-----</div>
+            <p id="online-status">Create a room, join a room code, or use quick match.</p>
+            <div class="online-grid">
+              <button id="online-create" type="button">Create room</button>
+              <button id="online-quick" type="button">Quick match</button>
+              <input id="online-code-input" maxlength="5" placeholder="ROOM CODE" autocomplete="off">
+              <button id="online-join" type="button">Join room</button>
+            </div>
+            <p id="online-ready-state">You: not ready • Opponent: not ready</p>
+            <div class="online-grid"><button id="online-ready">Ready</button><button id="online-close">Close</button></div>
+            <div class="online-server"><input id="online-server-url" placeholder="Auto: same server as this page"><button id="online-server-save">Save relay</button></div>
+          </div>
         </section>
 		<div id="toggle-music" class="center music-customization" style="display:none; cursor:default !important; display: flex; gap: 8px; align-items: center;">
     <span id="btn-play" style="font-size: 0.8em;">♫</span>
     <span id="btn-skip" style="font-size: 0.6em;">⏭</span>
 </div>
-		<script type = "text/javascript" src = "rng.js"></script>
-		<script type = "text/javascript" src = "net.js"></script>
-		<script type = "text/javascript" src = "cards.js"></script>
-		<script type = "text/javascript" src = "decks.js"></script>
-		<script type = "text/javascript" src = "abilities.js"></script>
-		<script type = "text/javascript" src = "factions.js"></script>
-		<script type = "text/javascript" src = "gwent.js"></script>
-		<script type = "text/javascript" src = "netplay.js"></script>
-		<script type = "text/javascript" src = "lobby.js"></script>
+		<script type = "text/javascript" src = "cards.js?v=1.4.3"></script>
+		<script type = "text/javascript" src = "decks.js?v=1.4.3"></script>
+		<script type = "text/javascript" src = "abilities.js?v=1.4.3"></script>
+		<script type = "text/javascript" src = "factions.js?v=1.4.3"></script>
+		<script type = "text/javascript" src = "gwent.js?v=1.4.3"></script>
+		<script type="text/javascript" src="fullscreen-fix.js?v=1.4.3"></script>
+		<script type="text/javascript" src="online-net.js?v=1.4.3"></script>
+		<script type="text/javascript" src="online.js?v=1.4.3"></script>
+		<script type="text/javascript" src="faction-carousel-fix.js?v=1.4.3"></script>
 	
 <audio id="bgMusicLocal"></audio>
 

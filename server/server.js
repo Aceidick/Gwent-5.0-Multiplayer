@@ -1,377 +1,380 @@
 "use strict"
 
-// ═══════════════════════════════════════════════════════════════════
-// server.js — WebSocket relay + static file server for Gwent 5.0.
-//
-// Serves the game files (HTML, JS, CSS, images, audio) from the repo
-// root AND handles WebSocket relay connections on the same port.
-// Pairs two players by room code (or quick-match) and forwards
-// messages between them verbatim. Holds NO game state — all simulation
-// runs client-side in lockstep.
-//
-// Run:  node server.js
-//   or: PORT=8080 node server.js
-// ═══════════════════════════════════════════════════════════════════
+// Relay server for gwent-classic online multiplayer.
+// Pairs two clients by a short room code — or automatically via quickmatch —
+// and forwards "msg" frames between them verbatim. Holds no game logic and no
+// persistent state; a room dies as soon as either side leaves or disconnects.
 
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const WebSocket = require("ws");
+const { WebSocketServer } = require("ws");
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8765;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null; // e.g. "https://example.com"
-const ROOM_CODE_LEN = 5;
-const ROOM_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing chars
-const RATE_LIMIT_WINDOW = 1000;   // ms
-const RATE_LIMIT_MAX = 30;         // messages per window per socket
-const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 min idle room cleanup
-const PING_INTERVAL = 30 * 1000;   // 30 s ping/pong keepalive
+const PORT = process.env.PORT || 8765;
+const WEB_ROOT = path.resolve(__dirname, "..");
+const HOST = process.env.HOST || "0.0.0.0";
+const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; // no 0/O/1/I/L
+const CODE_LENGTH = 5;
 
-// Static files live in the repo root (parent of server/)
-const STATIC_ROOT = path.resolve(__dirname, "..");
+const rooms = new Map(); // code -> {host, guest, startedAt, messages}
 
-const MIME_TYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".js":   "text/javascript; charset=utf-8",
-    ".css":  "text/css; charset=utf-8",
-    ".json": "application/json; charset=utf-8",
-    ".png":  "image/png",
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif":  "image/gif",
-    ".ico":  "image/x-icon",
-    ".svg":  "image/svg+xml",
-    ".ttf":  "font/ttf",
-    ".woff": "font/woff",
-    ".woff2":"font/woff2",
-    ".mp3":  "audio/mpeg",
-    ".wav":  "audio/wav",
-    ".ogg":  "audio/ogg",
-    ".txt":  "text/plain; charset=utf-8",
-    ".map":  "application/json",
+const MAX_CLIENTS = 400;
+const MAX_PER_IP = 10;
+const ROOM_TTL_MS = 30 * 60 * 1000;
+const MSG_RATE = 25;
+const MSG_BURST = 50;
+const MAX_BUFFER = 1024 * 1024;
+const VALID_EVENTS = new Set(["mode-sp", "mode-mp", "mode-qm", "sp-game-started", "sp-game-finished", "mp-game-completed"]);
+const EVENT_MAX_PER_IP = 60;
+const EVENT_MAX_IPS = 5000;
+const EVENT_WINDOW_MS = 60 * 1000;
+// Optional comma-separated allow-list. If unset, accept browser origins from
+// the LAN/public reverse proxy. Set ALLOWED_ORIGINS in production if desired.
+const ALLOWED_ORIGINS = new Set(
+  String(process.env.ALLOWED_ORIGINS || "")
+    .split(",").map(x => x.trim()).filter(Boolean)
+);
+
+const ipCounts = new Map();
+let lastOverloadLog = 0;
+let refusedSinceLog = 0;
+let eventHits = new Map();
+
+const MIME = {
+  ".html":"text/html; charset=utf-8", ".js":"text/javascript; charset=utf-8",
+  ".css":"text/css; charset=utf-8", ".json":"application/json; charset=utf-8",
+  ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".gif":"image/gif",
+  ".webp":"image/webp", ".svg":"image/svg+xml", ".ico":"image/x-icon",
+  ".mp3":"audio/mpeg", ".wav":"audio/wav", ".ogg":"audio/ogg", ".ttf":"font/ttf", ".woff2":"font/woff2"
 };
 
-// ── Room ────────────────────────────────────────────────────────────
-
-class Room {
-    constructor(code) {
-        this.code = code;
-        this.host = null;
-        this.guest = null;
-        this.createdAt = Date.now();
-        this.lastActivity = Date.now();
-        this.quickMatch = false;
-    }
-
-    get full() { return this.host && this.guest; }
-    get empty() { return !this.host && !this.guest; }
-
-    touch() { this.lastActivity = Date.now(); }
-
-    sendToPeer(from, msg) {
-        const peer = (from === this.host) ? this.guest : this.host;
-        if (peer && peer.readyState === WebSocket.OPEN) {
-            peer.send(JSON.stringify(msg));
-        }
-    }
-
-    broadcast(msg, except) {
-        for (const sock of [this.host, this.guest]) {
-            if (sock && sock !== except && sock.readyState === WebSocket.OPEN)
-                sock.send(JSON.stringify(msg));
-        }
-    }
-
-    destroy() {
-        for (const sock of [this.host, this.guest]) {
-            if (sock && sock.readyState === WebSocket.OPEN) {
-                sock.send(JSON.stringify({ type: "peer-left" }));
-            }
-        }
-        rooms.delete(this.code);
-    }
-
-    removePeer(sock) {
-        if (this.host === sock) this.host = null;
-        if (this.guest === sock) this.guest = null;
-        // Notify remaining peer
-        this.broadcast({ type: "peer-left" });
-        if (this.empty) rooms.delete(this.code);
-    }
-}
-
-const rooms = new Map();       // code → Room
-const quickMatchQueue = [];    // [socket, ...]
-const socketRooms = new Map();  // socket → Room
-
-// ── Helpers ────────────────────────────────────────────────────────
-
-function genCode() {
-    let code;
-    do {
-        code = "";
-        for (let i = 0; i < ROOM_CODE_LEN; i++)
-            code += ROOM_CHARS[Math.floor(Math.random() * ROOM_CHARS.length)];
-    } while (rooms.has(code));
-    return code;
-}
-
-function rateLimited(sock) {
-    if (!sock._msgTimes) sock._msgTimes = [];
-    const now = Date.now();
-    sock._msgTimes = sock._msgTimes.filter(t => now - t < RATE_LIMIT_WINDOW);
-    if (sock._msgTimes.length >= RATE_LIMIT_MAX) return true;
-    sock._msgTimes.push(now);
-    return false;
-}
-
-// ── Static file serving ────────────────────────────────────────────
-
-function serveStatic(req, res) {
-    let urlPath = req.url.split("?")[0];
-    if (urlPath === "/") urlPath = "/index.html";
-
-    // Decode and prevent path traversal
-    let decoded;
-    try { decoded = decodeURIComponent(urlPath); }
-    catch (e) { res.writeHead(400); res.end("Bad request"); return; }
-
-    // Block any path containing ..
-    if (decoded.indexOf("..") !== -1) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-    }
-
-    const filePath = path.join(STATIC_ROOT, decoded);
-
-    // Ensure resolved path stays within STATIC_ROOT
-    if (!filePath.startsWith(STATIC_ROOT)) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-    }
-
-    fs.stat(filePath, (err, stat) => {
-        if (err || !stat.isFile()) {
-            res.writeHead(404);
-            res.end("Not found");
-            return;
-        }
-        const ext = path.extname(filePath).toLowerCase();
-        const mime = MIME_TYPES[ext] || "application/octet-stream";
-        res.writeHead(200, { "Content-Type": mime });
-        fs.createReadStream(filePath).pipe(res);
-    });
-}
-
-// ── HTTP + WebSocket server ─────────────────────────────────────────
-
 const server = http.createServer((req, res) => {
-    // Health check endpoint
-    if (req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-            ok: true,
-            rooms: rooms.size,
-            qmQueue: quickMatchQueue.length,
-            uptime: process.uptime()
-        }));
-        return;
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  if (req.url === "/health") {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.writeHead(200);
+    res.end(JSON.stringify({ok:true, version:"1.4.3", clients:wss ? wss.clients.size : 0, rooms:rooms.size}));
+    return;
+  }
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.writeHead(204); res.end(); return;
+  }
+  if (req.method === "POST" && req.url === "/event") {
+    const ip = clientIp(req);
+    const hits = eventHits.get(ip) || 0;
+    if (hits >= EVENT_MAX_PER_IP || (hits === 0 && eventHits.size >= EVENT_MAX_IPS)) {
+      res.writeHead(429); res.end(); return;
     }
-    // Everything else: serve static game files
-    serveStatic(req, res);
+    eventHits.set(ip, hits + 1);
+    let body = ""; let aborted = false;
+    req.on("data", chunk => {
+      if (aborted) return; body += chunk;
+      if (body.length > 256) { aborted = true; req.destroy(); }
+    });
+    req.on("end", () => {
+      if (aborted) return;
+      try { const { type } = JSON.parse(body); if (VALID_EVENTS.has(type)) log(type); } catch (_) {}
+      res.writeHead(204); res.end();
+    });
+    return;
+  }
+  if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); return; }
+  let pathname;
+  try { pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname); }
+  catch (_) { res.writeHead(400); res.end("Bad request"); return; }
+  if (pathname === "/") pathname = "/index.html";
+  const rel = pathname.replace(/^\/+/, "");
+  const filePath = path.resolve(WEB_ROOT, rel);
+  if (filePath !== WEB_ROOT && !filePath.startsWith(WEB_ROOT + path.sep)) {
+    res.writeHead(403); res.end("Forbidden"); return;
+  }
+  fs.stat(filePath, (err, st) => {
+    if (err || !st.isFile()) { res.writeHead(404); res.end("Not found"); return; }
+    res.setHeader("Content-Type", MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream");
+    res.setHeader("Cache-Control", "no-store");
+    res.writeHead(200);
+    if (req.method === "HEAD") return res.end();
+    fs.createReadStream(filePath).pipe(res);
+  });
 });
 
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocketServer({
+	server,
+	path: "/ws",
+	maxPayload: 32 * 1024,
+	perMessageDeflate: false,
+	verifyClient: ({ origin }, cb) => {
+		// No allow-list configured: permit the page served by the LXC/LAN host.
+		// If ALLOWED_ORIGINS is configured, enforce it strictly.
+		const ok = ALLOWED_ORIGINS.size === 0 || !origin || ALLOWED_ORIGINS.has(origin);
+		cb(ok, 403, "forbidden");
+	}
+});
 
-// Short label for a socket, for logging. Uses the x-forwarded-for IP if
-// present (behind a proxy), otherwise the raw remote address, plus a
-// short counter so concurrent connections from the same IP differ.
-let connCounter = 0;
-function sockLabel(sock, req) {
-    const ip = (req && req.headers && req.headers["x-forwarded-for"])
-        || (req && req.socket && req.socket.remoteAddress)
-        || "?";
-    if (!sock._label)
-        sock._label = ip + "#" + (++connCounter);
-    return sock._label;
+function log(event, fields = {}) {
+	const parts = Object.entries(fields).map(([k, v]) => `${k}=${v}`).join("  ");
+	console.log(`[${new Date().toISOString()}] ${event.padEnd(14)} ${parts}`);
 }
 
-wss.on("connection", (sock, req) => {
-    // Origin check
-    if (ALLOWED_ORIGIN) {
-        const origin = req.headers.origin;
-        if (origin && origin !== ALLOWED_ORIGIN) {
-            sock.close(4001, "origin not allowed");
-            return;
-        }
-    }
+function makeCode() {
+	let code;
+	do {
+		code = "";
+		for (let i = 0; i < CODE_LENGTH; i++)
+			code += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
+	} while (rooms.has(code));
+	return code;
+}
 
-    console.log(`[connect] ${sockLabel(sock, req)}  online=${wss.clients.size}`);
-    sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
+function send(ws, obj) {
+	if (ws && ws.readyState === ws.OPEN) {
+		if (ws.bufferedAmount > MAX_BUFFER) {
+			ws.terminate();
+			return;
+		}
+		ws.send(JSON.stringify(obj));
+	}
+}
 
-    sock.on("message", (raw) => {
-        if (rateLimited(sock)) {
-            sock.send(JSON.stringify({ type: "error", code: "rate_limited" }));
-            return;
-        }
 
-        let msg;
-        try { msg = JSON.parse(raw); } catch (e) { return; }
+function reject(ws, code, context = {}) {
+  log("request-reject", { ip: ws.ip || "?", room: ws.room || "-", error: code, ...context });
+  send(ws, { type: "error", code });
+}
 
-        switch (msg.type) {
-            case "create": {
-                const room = new Room(genCode());
-                room.host = sock;
-                socketRooms.set(sock, room);
-                rooms.set(room.code, room);
-                console.log(`[create] ${sockLabel(sock, req)} room=${room.code}`);
-                sock.send(JSON.stringify({ type: "created", code: room.code }));
-                break;
-            }
+function peerOf(ws) {
+	const room = rooms.get(ws.room);
+	if (!room)
+		return null;
+	return room.host === ws ? room.guest : room.host;
+}
 
-            case "join": {
-                const room = rooms.get((msg.code || "").toUpperCase());
-                if (!room) {
-                    console.log(`[join] ${sockLabel(sock, req)} code=${(msg.code||"").toUpperCase()} -> not_found`);
-                    sock.send(JSON.stringify({ type: "error", code: "not_found" }));
-                    return;
-                }
-                if (room.guest) {
-                    console.log(`[join] ${sockLabel(sock, req)} room=${room.code} -> room_full`);
-                    sock.send(JSON.stringify({ type: "error", code: "room_full" }));
-                    return;
-                }
-                room.guest = sock;
-                room.touch();
-                socketRooms.set(sock, room);
-                console.log(`[join] ${sockLabel(sock, req)} room=${room.code}`);
-                sock.send(JSON.stringify({ type: "joined", code: room.code }));
-                // Notify BOTH peers that the room is full / opponent connected.
-                if (room.host && room.host.readyState === WebSocket.OPEN)
-                    room.host.send(JSON.stringify({ type: "peer-joined" }));
-                // The joining guest also needs to know the host is present so
-                // its lobby can switch to the ready flow.
-                sock.send(JSON.stringify({ type: "peer-joined" }));
-                break;
-            }
+function clientIp(req) {
+	const xff = req.headers["x-forwarded-for"];
+	if (xff) {
+		const parts = xff.split(",");
+		return parts[parts.length - 1].trim();
+	}
+	return req.socket.remoteAddress || "?";
+}
 
-            case "quickmatch": {
-                // Remove from existing room if any
-                const existing = socketRooms.get(sock);
-                if (existing) existing.removePeer(sock);
+function allowMessage(ws) {
+	const now = Date.now();
+	ws.tokens = Math.min(MSG_BURST, ws.tokens + (now - ws.lastRefill) / 1000 * MSG_RATE);
+	ws.lastRefill = now;
+	if (ws.tokens < 1)
+		return false;
+	ws.tokens -= 1;
+	return true;
+}
 
-                // Check if someone is already queued
-                if (quickMatchQueue.length > 0) {
-                    const partner = quickMatchQueue.shift();
-                    if (partner.readyState === WebSocket.OPEN) {
-                        const room = new Room(genCode());
-                        room.quickMatch = true;
-                        room.host = partner;
-                        room.guest = sock;
-                        socketRooms.set(partner, room);
-                        socketRooms.set(sock, room);
-                        rooms.set(room.code, room);
-                        console.log(`[quickmatch] ${sockLabel(partner, null)} + ${sockLabel(sock, req)} room=${room.code}`);
-                        partner.send(JSON.stringify({ type: "created", code: room.code }));
-                        sock.send(JSON.stringify({ type: "joined", code: room.code }));
-                        // Notify BOTH peers that the room is full.
-                        partner.send(JSON.stringify({ type: "peer-joined" }));
-                        sock.send(JSON.stringify({ type: "peer-joined" }));
-                    } else {
-                        // Partner disconnected, queue self
-                        quickMatchQueue.push(sock);
-                        console.log(`[quickmatch] ${sockLabel(sock, req)} queued (partner gone)`);
-                        sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
-                    }
-                } else {
-                    quickMatchQueue.push(sock);
-                    console.log(`[quickmatch] ${sockLabel(sock, req)} queued (waiting)`);
-                    sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
-                }
-                break;
-            }
+function destroyRoom(ws, notifyPeer, reason) {
+	const room = rooms.get(ws.room);
+	ws.room = null;
+	if (!room)
+		return;
+	rooms.delete(room.code);
+	const peer = room.host === ws ? room.guest : room.host;
+	if (peer) {
+		peer.room = null;
+		if (notifyPeer)
+			send(peer, { type: "peer-left" });
+	}
+	if (room.startedAt) {
+		const mins = Math.round((Date.now() - room.startedAt) / 60000);
+		log("game-ended", { code: room.code, messages: room.messages, duration: `${mins}m`, reason });
+	} else {
+		log("room-closed", { code: room.code, reason });
+	}
+}
 
-            case "msg": {
-                const room = socketRooms.get(sock);
-                if (room) {
-                    room.touch();
-                    room.sendToPeer(sock, { type: "msg", data: msg.data });
-                }
-                break;
-            }
+wss.on("connection", (ws, req) => {
+	log("ws-connected", { ip: clientIp(req), origin: req.headers.origin || "-" });
+	if (wss.clients.size > MAX_CLIENTS) {
+		refusedSinceLog++;
+		const now = Date.now();
+		if (now - lastOverloadLog > 60000) {
+			log("overloaded", { clients: wss.clients.size, refused: refusedSinceLog });
+			lastOverloadLog = now;
+			refusedSinceLog = 0;
+		}
+		ws.close(1013, "overloaded");
+		return;
+	}
+	const ip = clientIp(req);
+	if ((ipCounts.get(ip) || 0) >= MAX_PER_IP) {
+		ws.close(1013, "too-many");
+		return;
+	}
+	ipCounts.set(ip, (ipCounts.get(ip) || 0) + 1);
+	ws.ip = ip;
+	ws.isAlive = true;
+	ws.room = null;
+	ws.tokens = MSG_BURST;
+	ws.lastRefill = Date.now();
+	ws.on("pong", () => ws.isAlive = true);
 
-            case "leave": {
-                const room = socketRooms.get(sock);
-                if (room) {
-                    console.log(`[leave] ${sockLabel(sock, req)} room=${room.code}`);
-                    room.removePeer(sock);
-                    socketRooms.delete(sock);
-                }
-                break;
-            }
+	ws.on("message", raw => {
+		if (!allowMessage(ws))
+			return ws.close(1008, "rate");
+		let msg;
+		try {
+			msg = JSON.parse(raw);
+		} catch (e) {
+			return reject(ws, "bad-request");
+		}
+		switch (msg.type) {
+			case "create": {
+				if (ws.room)
+					return reject(ws, "already-in-room");
+				const code = makeCode();
+				rooms.set(code, { code: code, host: ws, guest: null, quickmatch: false, startedAt: null, createdAt: Date.now(), messages: 0 });
+				ws.room = code;
+				send(ws, { type: "created", code: code });
+				log("room-created", { code });
+				break;
+			}
+			case "quickmatch": {
+				if (ws.room)
+					return reject(ws, "already-in-room");
+				// Pair with the searcher who has been waiting the longest, if any.
+				// Skip hosts whose socket is closing but not yet reaped.
+				let match = null;
+				for (const room of rooms.values())
+					if (room.quickmatch && !room.guest && room.host.readyState === room.host.OPEN &&
+							(!match || room.createdAt < match.createdAt))
+						match = room;
+				if (match) {
+					match.guest = ws;
+					match.startedAt = Date.now();
+					ws.room = match.code;
+					send(ws, { type: "joined", code: match.code });
+					send(match.host, { type: "peer-joined" });
+					log("peer-paired", { code: match.code, mode: "quickmatch" });
+				} else {
+					const code = makeCode();
+					rooms.set(code, { code: code, host: ws, guest: null, quickmatch: true, startedAt: null, createdAt: Date.now(), messages: 0 });
+					ws.room = code;
+					send(ws, { type: "created", code: code });
+					send(ws, { type: "qm-status", online: wss.clients.size });
+					log("qm-waiting", { code });
+				}
+				break;
+			}
+			case "join": {
+                const requestedCode = String(msg.code || "").trim().toUpperCase();
+                log("join-attempt", { ip: ws.ip || "?", code: requestedCode });
+				if (ws.room)
+					return reject(ws, "already-in-room");
+				const code = requestedCode;
+				const room = rooms.get(code);
+				if (!room)
+					return reject(ws, "not-found", { requested: code });
+				if (room.guest)
+					return reject(ws, "full", { requested: code });
+				room.guest = ws;
+				room.startedAt = Date.now();
+				ws.room = code;
+				send(ws, { type: "joined", code: code });
+				send(room.host, { type: "peer-joined" });
+				log("peer-paired", { code });
+				break;
+			}
+			case "trace": {
+				const room = rooms.get(ws.room);
+				const role = room ? (room.host === ws ? "host" : "guest") : "-";
+				const d = (msg && msg.data && typeof msg.data === "object") ? msg.data : {};
+				const fields = {
+					code: ws.room || "-", from: role, stage: String(d.stage || "?"),
+					seq: d.seq == null ? "-" : d.seq, curr: d.curr || "-", actor: d.actor || "-", next: d.next || "-",
+					card: d.card || "-", target: d.target || "-", err: d.err ? String(d.err).slice(0,180) : "-"
+				};
+				log("client-trace", fields);
+				break;
+			}
+			case "msg": {
+				const peer = peerOf(ws);
+				if (!peer)
+					return reject(ws, "no-peer");
+				const eventType = msg && msg.data && typeof msg.data.t === "string" ? msg.data.t : "data";
+				if (["lobby-ready", "lobby-unready", "lobby-start", "lobby-start-ack", "match-forfeit", "match-stop", "action", "turn-state", "popup-choice", "choice", "choice-end", "choice-commit", "rearrange-card", "rearrange-row", "rearrange-end", "ability-target", "power-card", "number-choice", "destination"].includes(eventType)) {
+					const detail = { code: ws.room, from: rooms.get(ws.room)?.host === ws ? "host" : "guest" };
+					if (eventType === "lobby-start" || eventType === "lobby-start-ack") {
+						detail.seed = msg.data.seed;
+						detail.firstRole = msg.data.firstRole;
+					}
+					if (eventType === "action") {
+						detail.seq = msg.data.seq;
+						detail.actor = msg.data.actorRole;
+						detail.action = msg.data.a;
+					}
+					if (eventType === "turn-state") {
+						detail.seq = msg.data.seq;
+						detail.actor = msg.data.actorRole;
+						detail.next = msg.data.nextRole;
+					}
+					if (msg.data.decision) {
+						detail.decision = msg.data.decision || "-";
+						if (eventType === "popup-choice") detail.yes = !!msg.data.yes;
+						if (eventType === "choice") detail.card = msg.data.card && msg.data.card.key ? msg.data.card.key : "-";
+					}
+					log("relay-" + eventType, detail);
+				}
+				if (eventType === "lobby-start-ack")
+					log("match-handshake", { code: ws.room, state: "complete", seed: msg.data.seed, firstRole: msg.data.firstRole });
+				send(peer, { type: "msg", data: msg.data });
+				const room = rooms.get(ws.room);
+				if (room) room.messages++;
+				break;
+			}
+			case "leave":
+                log("leave-room", { ip: ws.ip || "?", code: ws.room || "-" });
+				destroyRoom(ws, true, "leave");
+				break;
+			default:
+				reject(ws, "bad-request");
+		}
+	});
 
-            default:
-                break;
-        }
-    });
-
-    sock.on("close", () => {
-        const label = sockLabel(sock, req);
-        console.log(`[disconnect] ${label}`);
-        // Remove from quick-match queue
-        const qmIdx = quickMatchQueue.indexOf(sock);
-        if (qmIdx >= 0) quickMatchQueue.splice(qmIdx, 1);
-
-        // Remove from room
-        const room = socketRooms.get(sock);
-        if (room) {
-            console.log(`[peer-left] ${label} room=${room.code}`);
-            room.removePeer(sock);
-            socketRooms.delete(sock);
-        }
-
-        // Broadcast updated online count
-        wss.clients.forEach(c => {
-            if (c.readyState === WebSocket.OPEN && !socketRooms.has(c))
-                c.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
-        });
-    });
+	ws.on("close", (code, reason) => {
+		log("ws-closed", { ip: ws.ip || "?", code, reason: String(reason || "-") });
+		const n = (ipCounts.get(ws.ip) || 1) - 1;
+		if (n <= 0)
+			ipCounts.delete(ws.ip);
+		else
+			ipCounts.set(ws.ip, n);
+		destroyRoom(ws, true, "disconnect");
+	});
 });
 
-// ── Periodic cleanup ────────────────────────────────────────────────
-
+// Reap dead connections (browsers answer pings automatically)
 setInterval(() => {
-    const now = Date.now();
-    for (const [code, room] of rooms) {
-        if (now - room.lastActivity > IDLE_TIMEOUT) {
-            room.destroy();
-        }
-    }
-    // Clean up stale quick-match entries
-    for (let i = quickMatchQueue.length - 1; i >= 0; i--) {
-        if (quickMatchQueue[i].readyState !== WebSocket.OPEN)
-            quickMatchQueue.splice(i, 1);
-    }
-}, 60 * 1000);
+	const now = Date.now();
+	const stale = [];
+	for (const room of rooms.values())
+		if (!room.startedAt && now - room.createdAt > ROOM_TTL_MS)
+			stale.push(room);
+	for (const room of stale) {
+		const host = room.host;
+		destroyRoom(host, false, "idle-timeout");
+		if (host)
+			host.close(1013, "idle");
+	}
+	for (const ws of wss.clients) {
+		if (!ws.isAlive) {
+			ws.terminate();
+			continue;
+		}
+		ws.isAlive = false;
+		ws.ping();
+	}
+	for (const room of rooms.values())
+		if (room.quickmatch && !room.guest)
+			send(room.host, { type: "qm-status", online: wss.clients.size });
+}, 30000);
 
-// ── Ping/pong keepalive ─────────────────────────────────────────────
+setInterval(() => { eventHits = new Map(); }, EVENT_WINDOW_MS);
 
-setInterval(() => {
-    wss.clients.forEach(sock => {
-        if (sock.readyState === WebSocket.OPEN)
-            sock.ping();
-    });
-}, PING_INTERVAL);
-
-// ── Start ───────────────────────────────────────────────────────────
-
-server.listen(PORT, () => {
-    console.log(`Gwent server listening on http://0.0.0.0:${PORT}`);
-    console.log(`  Game:    http://<this-host>:${PORT}/`);
-    console.log(`  Health:  http://<this-host>:${PORT}/health`);
-    console.log(`  Static root: ${STATIC_ROOT}`);
-    if (ALLOWED_ORIGIN)
-        console.log(`Origin check enabled: ${ALLOWED_ORIGIN}`);
-});
+server.listen(PORT, HOST, () => log("server-start", { host: HOST, port: PORT, version: "1.4.3" }));
