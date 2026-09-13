@@ -4,7 +4,7 @@
 // the relay server (server/server.js), which pairs two players by room code
 // and forwards "msg" frames between them verbatim, in order.
 var Net = {
-    DEFAULT_URL: "ws://localhost:8765",
+    DEFAULT_URL: null,  // auto-derive from page URL
 
     socket: null,
     connected: false,
@@ -19,7 +19,12 @@ var Net = {
 
     serverURL() {
         const param = new URLSearchParams(window.location.search).get("server");
-        return param || (localStorage && localStorage.getItem("gc-server-url")) || this.DEFAULT_URL;
+        if (param) return param;
+        if (localStorage && localStorage.getItem("gc-server-url"))
+            return localStorage.getItem("gc-server-url");
+        // Auto-derive WebSocket URL from the page URL
+        const loc = window.location;
+        return "ws://" + loc.hostname + ":" + (loc.port || "8765");
     },
 
     connect(url) {
@@ -55,7 +60,8 @@ var Net = {
 
     joinRoom(code) {
         return new Promise((resolve, reject) => {
-            this.pending = { resolve: resolve, reject: reject };
+    
+        this.pending = { resolve: resolve, reject: reject };
             this.sendRaw({ type: "join", code: code });
         });
     },
@@ -127,7 +133,8 @@ var Net = {
     },
 
     settle(err, val) {
-        const p = this.pending;
+        const p = this.pendi
+ng;
         if (!p)
             return;
         this.pending = null;

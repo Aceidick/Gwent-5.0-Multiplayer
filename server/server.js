@@ -1,17 +1,21 @@
 "use strict"
 
 // ═══════════════════════════════════════════════════════════════════
-// server.js — WebSocket relay server for Gwent 5.0 online multiplayer.
+// server.js — WebSocket relay + static file server for Gwent 5.0.
 //
-// Pairs two players by room code (or quick-match) and forwards messages
-// between them verbatim. Holds NO game state — all simulation runs
-// client-side in lockstep.
+// Serves the game files (HTML, JS, CSS, images, audio) from the repo
+// root AND handles WebSocket relay connections on the same port.
+// Pairs two players by room code (or quick-match) and forwards
+// messages between them verbatim. Holds NO game state — all simulation
+// runs client-side in lockstep.
 //
 // Run:  node server.js
 //   or: PORT=8080 node server.js
 // ═══════════════════════════════════════════════════════════════════
 
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const WebSocket = require("ws");
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8765;
@@ -22,6 +26,30 @@ const RATE_LIMIT_WINDOW = 1000;   // ms
 const RATE_LIMIT_MAX = 30;         // messages per window per socket
 const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 min idle room cleanup
 const PING_INTERVAL = 30 * 1000;   // 30 s ping/pong keepalive
+
+// Static files live in the repo root (parent of server/)
+const STATIC_ROOT = path.resolve(__dirname, "..");
+
+const MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js":   "text/javascript; charset=utf-8",
+    ".css":  "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".ico":  "image/x-icon",
+    ".svg":  "image/svg+xml",
+    ".ttf":  "font/ttf",
+    ".woff": "font/woff",
+    ".woff2":"font/woff2",
+    ".mp3":  "audio/mpeg",
+    ".wav":  "audio/wav",
+    ".ogg":  "audio/ogg",
+    ".txt":  "text/plain; charset=utf-8",
+    ".map":  "application/json",
+};
 
 // ── Room ────────────────────────────────────────────────────────────
 
@@ -97,9 +125,50 @@ function rateLimited(sock) {
     return false;
 }
 
-// ── WebSocket server ────────────────────────────────────────────────
+// ── Static file serving ────────────────────────────────────────────
+
+function serveStatic(req, res) {
+    let urlPath = req.url.split("?")[0];
+    if (urlPath === "/") urlPath = "/index.html";
+
+    // Decode and prevent path traversal
+    let decoded;
+    try { decoded = decodeURIComponent(urlPath); }
+    catch (e) { res.writeHead(400); res.end("Bad request"); return; }
+
+    // Block any path containing ..
+    if (decoded.indexOf("..") !== -1) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+    }
+
+    const filePath = path.join(STATIC_ROOT, decoded);
+
+    // Ensure resolved path stays within STATIC_ROOT
+    if (!filePath.startsWith(STATIC_ROOT)) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+    }
+
+    fs.stat(filePath, (err, stat) => {
+        if (err || !stat.isFile()) {
+            res.writeHead(404);
+            res.end("Not found");
+            return;
+        }
+        const ext = path.extname(filePath).toLowerCase();
+        const mime = MIME_TYPES[ext] || "application/octet-stream";
+        res.writeHead(200, { "Content-Type": mime });
+        fs.createReadStream(filePath).pipe(res);
+    });
+}
+
+// ── HTTP + WebSocket server ─────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
+    // Health check endpoint
     if (req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -108,10 +177,10 @@ const server = http.createServer((req, res) => {
             qmQueue: quickMatchQueue.length,
             uptime: process.uptime()
         }));
-    } else {
-        res.writeHead(404);
-        res.end("Not found");
+        return;
     }
+    // Everything else: serve static game files
+    serveStatic(req, res);
 });
 
 const wss = new WebSocket.Server({ server });
@@ -269,7 +338,10 @@ setInterval(() => {
 // ── Start ───────────────────────────────────────────────────────────
 
 server.listen(PORT, () => {
-    console.log(`Gwent relay server listening on ws://localhost:${PORT}`);
+    console.log(`Gwent server listening on http://0.0.0.0:${PORT}`);
+    console.log(`  Game:    http://<this-host>:${PORT}/`);
+    console.log(`  Health:  http://<this-host>:${PORT}/health`);
+    console.log(`  Static root: ${STATIC_ROOT}`);
     if (ALLOWED_ORIGIN)
         console.log(`Origin check enabled: ${ALLOWED_ORIGIN}`);
 });
