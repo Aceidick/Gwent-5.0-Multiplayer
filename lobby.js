@@ -17,8 +17,8 @@ var Lobby = {
 
     remoteDeck: null,
     localDeck: null,
-    ready: false,
-    peerReady: false,
+    isReady: false,
+    peerIsReady: false,
 
     init() {
         this._buildOverlay();
@@ -155,8 +155,8 @@ var Lobby = {
     _reset() {
         this.remoteDeck = null;
         this.localDeck = null;
-        this.ready = false;
-        this.peerReady = false;
+        this.isReady = false;
+        this.peerIsReady = false;
     },
 
     _setStatus(msg) {
@@ -229,8 +229,8 @@ var Lobby = {
         console.log("[lobby] peer-joined  connected=" + Net.connected + " code=" + Net.code + " role=" + Net.role);
         // Opponent connected. Hide the lobby overlay so the deck-customization
         // and Start game button are fully interactive.
-        this.peerReady = false;
-        this.ready = false;
+        this.peerIsReady = false;
+        this.isReady = false;
         this.remoteDeck = null;
         this._showReadyBar();
         this._showReadyState();
@@ -240,8 +240,8 @@ var Lobby = {
         if (mp.active) {
             mp.deactivate();
         }
-        this.peerReady = false;
-        this.ready = false;
+        this.peerIsReady = false;
+        this.isReady = false;
         this.remoteDeck = null;
         if (this.readyStatus)
             this.readyStatus.textContent = "Opponent disconnected. You can close or wait for a new opponent.";
@@ -256,8 +256,8 @@ var Lobby = {
     // Whether the local player can use 'Start game' to ready up (an opponent
     // is connected and the match hasn't started yet).
     canReady() {
-        let r = Net.connected && Net.code !== null && !mp.active && !this.ready;
-        if (!r) console.log("[lobby] canReady=false connected=" + Net.connected + " code=" + Net.code + " mp.active=" + mp.active + " ready=" + this.ready);
+        let r = Net.connected && Net.code !== null && !mp.active && !this.isReady;
+        if (!r) console.log("[lobby] canReady=false connected=" + Net.connected + " code=" + Net.code + " mp.active=" + mp.active + " ready=" + this.isReady);
         return r;
     },
 
@@ -266,7 +266,7 @@ var Lobby = {
     // connected).
     canRematch() {
         return Net.connected && Net.code !== null && mp.active && game && game.over
-            && !this.ready;
+            && !this.isReady;
     },
 
     // Called from the end screen (or after give up) to surface the rematch
@@ -274,8 +274,8 @@ var Lobby = {
     // connection.
     onMatchEnded() {
         if (!Net.connected || Net.code === null) return;
-        this.ready = false;
-        this.peerReady = false;
+        this.isReady = false;
+        this.peerIsReady = false;
         this._showReadyBar();
         this._showReadyState();
     },
@@ -283,8 +283,8 @@ var Lobby = {
     // Pressing 'Start game' for a rematch: keep the same decks, request a new
     // seed from the host and start a fresh match on the same connection.
     rematch() {
-        if (this.ready) return;
-        this.ready = true;
+        if (this.isReady) return;
+        this.isReady = true;
         Net.send({ t: "lobby-rematch" });
         this._showReadyState();
         this._maybeStart();
@@ -293,8 +293,8 @@ var Lobby = {
     // Called when the local player presses 'Start game' while connected to an
     // opponent. Sends the local deck and marks the player as ready.
     ready() {
-        console.log("[lobby] ready() called  alreadyReady=" + this.ready);
-        if (this.ready) return;
+        console.log("[lobby] ready() called  alreadyReady=" + this.isReady);
+        if (this.isReady) return;
         // Validate the deck one more time before sending.
         if (typeof dm !== "undefined" && dm.stats) {
             console.log("[lobby] ready() deck units=" + dm.stats.units + " special=" + dm.stats.special);
@@ -311,7 +311,7 @@ var Lobby = {
         this.localDeck = (typeof raw === "string") ? JSON.parse(raw) : raw;
         console.log("[lobby] sending lobby-ready deck=" + JSON.stringify(this.localDeck));
         Net.send({ t: "lobby-ready", deck: this.localDeck });
-        this.ready = true;
+        this.isReady = true;
         this._showReadyState();
         this._maybeStart();
     },
@@ -321,8 +321,8 @@ var Lobby = {
             this._setStatus("Waiting for an opponent to connect...");
             return;
         }
-        let me = this.ready ? "You are ready" : "Not ready";
-        let peer = this.peerReady ? "Opponent is ready" : "Opponent not ready";
+        let me = this.isReady ? "You are ready" : "Not ready";
+        let peer = this.peerIsReady ? "Opponent is ready" : "Opponent not ready";
         let msg = me + "  •  " + peer + "  —  Press 'Start game' when ready.";
         if (this.readyStatus) this.readyStatus.textContent = msg;
         this._setStatus(msg);
@@ -332,13 +332,13 @@ var Lobby = {
         console.log("[lobby] _onMessage t=" + data.t);
         if (data.t === "lobby-ready") {
             this.remoteDeck = (typeof data.deck === "string") ? JSON.parse(data.deck) : data.deck;
-            this.peerReady = true;
+            this.peerIsReady = true;
             console.log("[lobby] peer ready, remoteDeck faction=" + (this.remoteDeck && this.remoteDeck.faction));
             this._showReadyState();
             this._maybeStart();
         } else if (data.t === "lobby-rematch") {
             // Peer wants a rematch on the existing connection.
-            this.peerReady = true;
+            this.peerIsReady = true;
             this._showReadyState();
             this._maybeStart();
         } else if (data.t === "lobby-start") {
@@ -355,8 +355,8 @@ var Lobby = {
 
     _maybeStart() {
         // Only start once both players are ready (decks exchanged).
-        console.log("[lobby] _maybeStart ready=" + this.ready + " peerReady=" + this.peerReady + " remoteDeck=" + !!this.remoteDeck + " role=" + Net.role);
-        if (!this.ready || !this.peerReady || !this.remoteDeck) return;
+        console.log("[lobby] _maybeStart ready=" + this.isReady + " peerReady=" + this.peerIsReady + " remoteDeck=" + !!this.remoteDeck + " role=" + Net.role);
+        if (!this.isReady || !this.peerIsReady || !this.remoteDeck) return;
         if (Net.role === "host") {
             // Host generates seed and starts; guest starts on lobby-start.
             let seed = GameRNG.randomSeed();
