@@ -30,6 +30,10 @@ var Lobby = {
     _buildOverlay() {
         let ov = document.createElement("div");
         ov.id = "mp-lobby";
+        // The overlay is a full-screen layer. In 'find' mode it has a dark
+        // backdrop and blocks the deck builder; in 'ready' mode it becomes
+        // transparent and click-through except for the ready bar, so the
+        // player can build their deck and press Start game.
         ov.style.cssText = [
             "position:fixed", "top:0", "left:0", "width:100%", "height:100%",
             "background:rgba(10,12,18,0.94)", "z-index:9999",
@@ -56,7 +60,7 @@ var Lobby = {
                         style="padding:6px 10px;font-size:13px;width:280px;background:#1a1812;color:#e8d5a3;border:1px solid #5a4f3a;text-align:center" />
                 </div>
             </div>
-            <div id="mp-ready" style="display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);max-width:520px;width:92%;padding:10px 18px;background:rgba(20,18,14,0.96);border:1px solid #8a6000;border-radius:8px;z-index:9999;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap">
+            <div id="mp-ready" style="display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);max-width:520px;width:92%;padding:10px 18px;background:rgba(20,18,14,0.96);border:1px solid #8a6000;border-radius:8px;z-index:9999;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:auto">
                 <span id="mp-ready-status" style="font-size:14px;color:#e8d5a3;flex:1;min-width:200px;text-align:left"></span>
                 <button id="mp-ready-close" style="padding:8px 18px;font-size:13px;cursor:pointer;background:#2a251c;color:#e8d5a3;border:1px solid #8a6000">Leave</button>
             </div>
@@ -87,13 +91,23 @@ var Lobby = {
     _showFindView() {
         if (this.findView) this.findView.style.display = "flex";
         if (this.readyBar) this.readyBar.style.display = "none";
+        // Full dark backdrop, block the deck builder behind.
+        if (this.overlay) {
+            this.overlay.style.background = "rgba(10,12,18,0.94)";
+            this.overlay.style.pointerEvents = "auto";
+        }
     },
 
     // Switch to the compact 'ready' bar so the deck builder stays usable while
-    // waiting for the opponent / before pressing Start game.
+    // waiting for the opponent / before pressing Start game. The overlay becomes
+    // transparent and click-through except for the ready bar itself.
     _showReadyBar() {
         if (this.findView) this.findView.style.display = "none";
         if (this.readyBar) this.readyBar.style.display = "flex";
+        if (this.overlay) {
+            this.overlay.style.background = "transparent";
+            this.overlay.style.pointerEvents = "none";
+        }
     },
 
     show() {
@@ -237,6 +251,36 @@ var Lobby = {
         return Net.connected && Net.code !== null && !mp.active && !this.ready;
     },
 
+    // Whether the local player can press 'Start game' to start a rematch on
+    // the existing connection (the previous match ended and the peer is still
+    // connected).
+    canRematch() {
+        return Net.connected && Net.code !== null && mp.active && game && game.over
+            && !this.ready;
+    },
+
+    // Called from the end screen (or after give up) to surface the rematch
+    // bar so the player can press Start game for a new match on the same
+    // connection.
+    onMatchEnded() {
+        if (!Net.connected || Net.code === null) return;
+        this.ready = false;
+        this.peerReady = false;
+        this.overlay.style.display = "flex";
+        this._showReadyBar();
+        this._showReadyState();
+    },
+
+    // Pressing 'Start game' for a rematch: keep the same decks, request a new
+    // seed from the host and start a fresh match on the same connection.
+    rematch() {
+        if (this.ready) return;
+        this.ready = true;
+        Net.send({ t: "lobby-rematch" });
+        this._showReadyState();
+        this._maybeStart();
+    },
+
     // Called when the local player presses 'Start game' while connected to an
     // opponent. Sends the local deck and marks the player as ready.
     ready() {
@@ -275,6 +319,11 @@ var Lobby = {
     _onMessage(data) {
         if (data.t === "lobby-ready") {
             this.remoteDeck = (typeof data.deck === "string") ? JSON.parse(data.deck) : data.deck;
+            this.peerReady = true;
+            this._showReadyState();
+            this._maybeStart();
+        } else if (data.t === "lobby-rematch") {
+            // Peer wants a rematch on the existing connection.
             this.peerReady = true;
             this._showReadyState();
             this._maybeStart();
@@ -325,6 +374,12 @@ var Lobby = {
 
         // Hide lobby
         this.overlay.style.display = "none";
+
+        // Reset the game state before starting (important for rematches, so
+        // the board/scores are cleared from the previous match).
+        if (typeof game !== "undefined" && typeof game.reset === "function")
+            game.reset();
+        if (typeof limpar === "function") limpar();
 
         // Start the game in mode 4
         dm.startNewGame(4);

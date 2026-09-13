@@ -3281,6 +3281,10 @@ if (canVibrate) navigator.vibrate(1000);
 
         fadeIn(endScreen, 300);
         ui.enablePlayer(true);
+        // In online mode, surface the rematch bar so the player can press
+        // Start game for a new match on the same connection.
+        if (typeof mp !== "undefined" && mp.active && typeof Lobby !== "undefined")
+            Lobby.onMatchEnded();
     }
 
     // Returns the client to the deck customization screen
@@ -5695,6 +5699,12 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
 
         document.getElementById("start-game").addEventListener("click", () => {
             actualizartituloporid();
+            // If an online match just ended, 'Start game' requests a rematch
+            // on the same connection.
+            if (typeof Lobby !== "undefined" && Lobby.canRematch()) {
+                Lobby.rematch();
+                return;
+            }
             // If an online opponent is connected and waiting, 'Start game'
             // acts as the ready/start button for the online match.
             if (typeof Lobby !== "undefined" && Lobby.canReady()) {
