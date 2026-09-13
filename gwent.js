@@ -5693,7 +5693,16 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
             ui.player1DeckTitle = this.me_deck_title;
         };
 
-        document.getElementById("start-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(1); }, false);
+        document.getElementById("start-game").addEventListener("click", () => {
+            actualizartituloporid();
+            // If an online opponent is connected and waiting, 'Start game'
+            // acts as the ready/start button for the online match.
+            if (typeof Lobby !== "undefined" && Lobby.canReady()) {
+                Lobby.ready();
+                return;
+            }
+            this.startNewGame(1);
+        }, false);
 
         let onlineBtn = document.getElementById("start-online-game");
         if (onlineBtn)
@@ -7273,16 +7282,13 @@ async function cartaNaLinha(id, carta) {
 }
 
 function applyStartMode() {
-    let mode = window.__gwentStartMode || "computer";
+    // Both start buttons are always available: 'Start game' plays vs AI
+    // (or acts as the ready/start button once an online opponent is found),
+    // 'Online Multiplayer' opens the lobby to find a human opponent.
     let startBtn = document.getElementById("start-game");
     let onlineBtn = document.getElementById("start-online-game");
-    if (mode === "pvp") {
-        if (startBtn) startBtn.style.display = "none";
-        if (onlineBtn) onlineBtn.style.display = "";
-    } else {
-        if (startBtn) startBtn.style.display = "";
-        if (onlineBtn) onlineBtn.style.display = "none";
-    }
+    if (startBtn) startBtn.style.display = "";
+    if (onlineBtn) onlineBtn.style.display = "";
 }
 function inicio() {
     var classe = document.getElementsByClassName("abs");

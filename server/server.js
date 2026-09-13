@@ -185,6 +185,19 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
+// Short label for a socket, for logging. Uses the x-forwarded-for IP if
+// present (behind a proxy), otherwise the raw remote address, plus a
+// short counter so concurrent connections from the same IP differ.
+let connCounter = 0;
+function sockLabel(sock, req) {
+    const ip = (req && req.headers && req.headers["x-forwarded-for"])
+        || (req && req.socket && req.socket.remoteAddress)
+        || "?";
+    if (!sock._label)
+        sock._label = ip + "#" + (++connCounter);
+    return sock._label;
+}
+
 wss.on("connection", (sock, req) => {
     // Origin check
     if (ALLOWED_ORIGIN) {
@@ -195,6 +208,7 @@ wss.on("connection", (sock, req) => {
         }
     }
 
+    console.log(`[connect] ${sockLabel(sock, req)}  online=${wss.clients.size}`);
     sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
 
     sock.on("message", (raw) => {
@@ -212,6 +226,7 @@ wss.on("connection", (sock, req) => {
                 room.host = sock;
                 socketRooms.set(sock, room);
                 rooms.set(room.code, room);
+                console.log(`[create] ${sockLabel(sock, req)} room=${room.code}`);
                 sock.send(JSON.stringify({ type: "created", code: room.code }));
                 break;
             }
@@ -219,16 +234,19 @@ wss.on("connection", (sock, req) => {
             case "join": {
                 const room = rooms.get((msg.code || "").toUpperCase());
                 if (!room) {
+                    console.log(`[join] ${sockLabel(sock, req)} code=${(msg.code||"").toUpperCase()} -> not_found`);
                     sock.send(JSON.stringify({ type: "error", code: "not_found" }));
                     return;
                 }
                 if (room.guest) {
+                    console.log(`[join] ${sockLabel(sock, req)} room=${room.code} -> room_full`);
                     sock.send(JSON.stringify({ type: "error", code: "room_full" }));
                     return;
                 }
                 room.guest = sock;
                 room.touch();
                 socketRooms.set(sock, room);
+                console.log(`[join] ${sockLabel(sock, req)} room=${room.code}`);
                 sock.send(JSON.stringify({ type: "joined", code: room.code }));
                 // Notify host that a guest joined
                 if (room.host && room.host.readyState === WebSocket.OPEN)
@@ -252,16 +270,19 @@ wss.on("connection", (sock, req) => {
                         socketRooms.set(partner, room);
                         socketRooms.set(sock, room);
                         rooms.set(room.code, room);
+                        console.log(`[quickmatch] ${sockLabel(partner, null)} + ${sockLabel(sock, req)} room=${room.code}`);
                         partner.send(JSON.stringify({ type: "created", code: room.code }));
                         sock.send(JSON.stringify({ type: "joined", code: room.code }));
                         partner.send(JSON.stringify({ type: "peer-joined" }));
                     } else {
                         // Partner disconnected, queue self
                         quickMatchQueue.push(sock);
+                        console.log(`[quickmatch] ${sockLabel(sock, req)} queued (partner gone)`);
                         sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
                     }
                 } else {
                     quickMatchQueue.push(sock);
+                    console.log(`[quickmatch] ${sockLabel(sock, req)} queued (waiting)`);
                     sock.send(JSON.stringify({ type: "qm-status", online: wss.clients.size }));
                 }
                 break;
@@ -279,6 +300,7 @@ wss.on("connection", (sock, req) => {
             case "leave": {
                 const room = socketRooms.get(sock);
                 if (room) {
+                    console.log(`[leave] ${sockLabel(sock, req)} room=${room.code}`);
                     room.removePeer(sock);
                     socketRooms.delete(sock);
                 }
@@ -291,6 +313,8 @@ wss.on("connection", (sock, req) => {
     });
 
     sock.on("close", () => {
+        const label = sockLabel(sock, req);
+        console.log(`[disconnect] ${label}`);
         // Remove from quick-match queue
         const qmIdx = quickMatchQueue.indexOf(sock);
         if (qmIdx >= 0) quickMatchQueue.splice(qmIdx, 1);
@@ -298,6 +322,7 @@ wss.on("connection", (sock, req) => {
         // Remove from room
         const room = socketRooms.get(sock);
         if (room) {
+            console.log(`[peer-left] ${label} room=${room.code}`);
             room.removePeer(sock);
             socketRooms.delete(sock);
         }

@@ -2351,6 +2351,16 @@ border-radius: .5vw;
     font-size: .98vw;
 border-radius: .5vw;
 }
+#start-online-game {
+    position: absolute;
+    top: 94%;
+    left: 45.7%;
+    // width: 8%;
+    height: 3.5%;
+    font-size: .98vw;
+border-radius: .5vw;
+}
+
 
 .start-game_class {
 	white-space: nowrap;
