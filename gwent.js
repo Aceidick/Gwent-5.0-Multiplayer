@@ -1151,6 +1151,11 @@ class Player {
                 this.hand = new Hand(document.getElementById("op-hand-row"), this.tag);
                 document.getElementById("op-hand-row").classList.add("human-op"); // This a playable opponent hand
             }
+        } else if (game.mode === 4) {
+            // Online PvP — local player gets visible hand, remote gets hidden
+            this.hand = (id === 0) ? new Hand(document.getElementById("hand-row"), this.tag) : new HandAI(this.tag);
+            if (id === 1 && typeof ControllerRemote !== "undefined")
+                this.controller = new ControllerRemote(this);
         } else {
             this.hand = (id === 0) ? new Hand(document.getElementById("hand-row"), this.tag) : new HandAI(this.tag);
         }
@@ -1280,7 +1285,9 @@ class Player {
             may_pass1 = true;
         }
 
-        if (this.controller instanceof ControllerAI) {
+        if (this.controller && this.controller.isRemote) {
+            await this.controller.startTurn(this);
+        } else if (this.controller instanceof ControllerAI) {
             await this.controller.startTurn(this);
         } else {
             // If there is a pending forced action, do it or pass
@@ -1736,8 +1743,12 @@ class CardContainer {
             return [];
         if (!n || n === 1)
             return [valid[randomInt(valid.length)]];
-        // Randum shuffle then select first n items
-        valid = [...valid].sort(() => 0.5 - Math.random())
+        // Deterministic shuffle (Fisher-Yates) then select first n items
+        valid = [...valid];
+        for (let j = valid.length - 1; j > 0; j--) {
+            let k = randomInt(j + 1);
+            [valid[j], valid[k]] = [valid[k], valid[j]];
+        }
         return valid.slice(0, n);
     }
 
@@ -3008,7 +3019,14 @@ actualizarPosicionMusicaMovel();
 
     // Simulated coin toss to determine who starts game
     async coinToss() {
-        this.firstPlayer = (Math.random() < 0.5) ? player_me : player_op;
+        if (typeof mp !== "undefined" && mp.active) {
+            // Role-relative: 0 = host starts, 1 = guest starts
+            let starter = GameRNG.game.int(2);
+            let iAmHost = mp.role === "host";
+            this.firstPlayer = (starter === 0) === iAmHost ? player_me : player_op;
+        } else {
+            this.firstPlayer = (Math.random() < 0.5) ? player_me : player_op;
+        }
 tocar("coin", false);
         await ui.notification(this.firstPlayer.tag + "-coin", 1200);
         return this.firstPlayer;
@@ -3048,17 +3066,23 @@ tocar("coin", false);
             }
         } else {
             // player vs player - both have a redraw - player 1 first
-            if (this.mode === 3) {
+            if (this.mode === 3 || this.mode === 4) {
+                if (this.mode === 4 && mp.active)
+                    mp._shuffleRole = mp.role;
                 if (player_me.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 1 - Choose " + myCount +" cards to put back to deck.");
                 } else {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await player_me.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 1 - Choose up to " + myCount +" cards to redraw.");
                 }
+                if (this.mode === 4 && mp.active)
+                    mp._shuffleRole = (mp.role === "host") ? "guest" : "host";
                 if (player_op.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 2 - Choose " + opCount +" cards to put back to deck.");
                 } else {
                     await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await player_op.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 2 - Choose up to " + opCount +" cards to redraw.");
                 }
+                if (this.mode === 4 && mp.active)
+                    mp._shuffleRole = null;
             } else {
                 if (player_me.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Choose " + myCount +" cards to put back to deck.");
@@ -5676,6 +5700,10 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
         document.getElementById("start-ai-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(2); }, false);
         document.getElementById("start-pvp-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(3); }, false);
 
+        let onlineBtn = document.getElementById("start-online-game");
+        if (onlineBtn)
+            onlineBtn.addEventListener("click", () => { if (typeof Lobby !== "undefined") Lobby.show(); }, false);
+
 
         window.addEventListener("keydown", function (e) {
             if (document.getElementById("deck-customization").className.indexOf("hide") == -1) {
@@ -6045,6 +6073,10 @@ makePreview(index, num, container_elem, cards) {
             // AI vs AI
             player_me = new Player(0, "Player 1", me_deck, true);
             player_op = new Player(1, "Player 2", this.start_op_deck, true);
+        } else if (game.mode === 4) {
+            // Online PvP — both non-AI; remote player gets ControllerRemote in constructor
+            player_me = new Player(0, "Player 1", me_deck, false);
+            player_op = new Player(1, "Player 2", this.start_op_deck, false);
         } else {
             // PVP
             player_me = new Player(0, "Player 1", me_deck, false);
