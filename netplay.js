@@ -38,7 +38,6 @@ var mp = {
     active: false,
     role: null,          // "host" | "guest"
     seed: null,
-    _shuffleRole: null,  // set during deck initialization
     _queue: [],          // received messages awaiting consumption
     _waiters: [],        // pending next() calls
     _lastAction: null,   // captured action for local player
@@ -52,10 +51,16 @@ var mp = {
         this._desync = false;
     },
 
+    // ---- perspective translation ----
+    otherRole(role) { return role === "host" ? "guest" : "host"; },
+    localRole() { return this.active ? this.role : "host"; },
+    roleOfId(id) { return id === 0 ? this.localRole() : this.otherRole(this.localRole()); },
+    roleOf(player) { return player === player_me ? this.localRole() : this.otherRole(this.localRole()); },
+    playerOf(role) { return role === this.localRole() ? player_me : player_op; },
+
     deactivate() {
         this.active = false;
         this.role = null;
-        this._shuffleRole = null;
     },
 
     send(msg) {
@@ -92,15 +97,22 @@ var mp = {
         this._queue.push(msg);
     },
 
-    // Simple game-state checksum for desync detection.
+    // Perspektiv-neutral checksum: iterate over fixed roles (host then guest)
+    // and fixed role-relative row indices so both clients compute the same
+    // string for the same game state. board.row[0..2] is the opponent of
+    // player_me and [3..5] is player_me, so for a given role the player's own
+    // rows are indices [3..5] if that role is the local player, else [0..2].
     checksum() {
         let p = [];
-        for (let pl of [player_me, player_op]) {
+        for (let role of ["host", "guest"]) {
+            let pl = this.playerOf(role);
             p.push(pl.total, pl.health, pl.passed ? 1 : 0,
                    pl.hand.cards.length, pl.deck.cards.length);
+            // This role's own rows: [3..5] if local, [0..2] if remote.
+            let base = (pl === player_me) ? 3 : 0;
+            for (let r = 0; r < 3; r++)
+                p.push(board.row[base + r].total, board.row[base + r].cards.length);
         }
-        for (let i = 0; i < 6; i++)
-            p.push(board.row[i].total, board.row[i].cards.length);
         p.push(weather.cards.length, game.roundCount);
         return p.join(",");
     },
@@ -352,21 +364,15 @@ class ControllerRemote {
 
 var _origRandomInt = randomInt;
 randomInt = function(n) {
-    if (typeof mp !== "undefined" && mp.active) {
-        if (mp._shuffleRole)
-            return GameRNG.deckFor(mp._shuffleRole).int(n);
+    if (typeof mp !== "undefined" && mp.active)
         return GameRNG.game.int(n);
-    }
     return _origRandomInt(n);
 };
 
 var _origMathRandom = Math.random;
 Math.random = function() {
-    if (typeof mp !== "undefined" && mp.active) {
-        if (mp._shuffleRole)
-            return GameRNG.deckFor(mp._shuffleRole).float();
+    if (typeof mp !== "undefined" && mp.active)
         return GameRNG.game.float();
-    }
     return _origMathRandom.call(Math);
 };
 

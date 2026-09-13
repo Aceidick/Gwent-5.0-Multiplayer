@@ -1162,6 +1162,11 @@ class Player {
         this.hand.player = this;
         this.grave = new Grave(document.getElementById("grave-" + this.tag));
         this.deck = new Deck(deck.faction, document.getElementById("deck-" + this.tag));
+        // Tag the deck with the owner's netplay role so its shuffle stream is
+        // deterministic per-role in online games. mp (netplay.js) loads after
+        // gwent.js, so guard for single-player where mp is undefined/inactive.
+        if (typeof mp !== "undefined" && mp.active && typeof mp.roleOfId === "function")
+            this.deck.rngRole = mp.roleOfId(id);
         this.deck_data = deck;
         this.leader = new Card(deck.leader.index, deck.leader.card, this);
         this.elem_leader = document.getElementById("leader-" + this.tag);
@@ -1194,15 +1199,9 @@ class Player {
         this.grave.reset();
         this.hand.reset();
         this.deck.reset();
-        // In online mode, each deck must shuffle from its own per-role RNG
-        // stream (deckHost/deckGuest) so both clients produce the same deck
-        // order for the same role regardless of which player initializes first.
-        let prevShuffleRole = (typeof mp !== "undefined") ? mp._shuffleRole : null;
-        if (typeof mp !== "undefined" && mp.active && this.mpRole)
-            mp._shuffleRole = this.mpRole;
+        // deck.rngRole (set in the Player constructor) makes initializeFromID
+        // shuffle from this deck's per-role RNG stream deterministically.
         this.deck.initializeFromID(this.deck_data.cards, this);
-        if (typeof mp !== "undefined")
-            mp._shuffleRole = prevShuffleRole;
 
         this.health = 2;
         this.total = 0;
@@ -1818,7 +1817,12 @@ class CardContainer {
     // Adds a card to a random index of the CardContainer
     addCardRandom(card) {
         this.cards.push(card);
-        let index = randomInt(this.cards.length);
+        // In online mode each deck shuffles from its own per-role RNG stream
+        // (deckHost/deckGuest) so both clients produce the same deck order for
+        // the same role. Falls back to randomInt (Math.random) offline.
+        const rng = (this.rngRole && typeof GameRNG !== "undefined" && GameRNG.deckFor)
+            ? GameRNG.deckFor(this.rngRole) : null;
+        let index = rng ? rng.int(this.cards.length) : randomInt(this.cards.length);
         if (index !== this.cards.length - 1) {
             let t = this.cards[this.cards.length - 1];
             this.cards[this.cards.length - 1] = this.cards[index];
@@ -1970,8 +1974,12 @@ class Deck extends CardContainer {
     constructor(faction, elem) {
         super(elem);
         this.faction = faction;
-
-        this.counter = document.createElement("div");
+        // Netplay role of the player who owns this deck. Set in Player
+        // constructor via mp.roleOfId(id) so addCardRandom shuffles from
+        // this deck's per-role RNG stream (deckHost/deckGuest), keeping both
+        // clients deterministic regardless of initialization order. Null in
+        // single-player.
+        this.rngRole = null;
         this.counter.classList = "deck-counter center";
         this.counter.appendChild(document.createTextNode(this.cards.length));
         this.elem.appendChild(this.counter);
@@ -3075,22 +3083,16 @@ tocar("coin", false);
         } else {
             // player vs player - both have a redraw - player 1 first
             if (this.mode === 3 || this.mode === 4) {
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = mp.role;
                 if (player_me.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 1 - Choose " + myCount +" cards to put back to deck.");
                 } else {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await player_me.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 1 - Choose up to " + myCount +" cards to redraw.");
                 }
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = (mp.role === "host") ? "guest" : "host";
                 if (player_op.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 2 - Choose " + opCount +" cards to put back to deck.");
                 } else {
                     await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await player_op.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 2 - Choose up to " + opCount +" cards to redraw.");
                 }
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = null;
             } else {
                 if (player_me.leader.key === "sc_francesca_daisy") {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Choose " + myCount +" cards to put back to deck.");
@@ -6111,22 +6113,11 @@ makePreview(index, num, container_elem, cards) {
             player_me = new Player(0, "Player 1", me_deck, true);
             player_op = new Player(1, "Player 2", this.start_op_deck, true);
         } else if (game.mode === 4) {
-            // Online PvP — both non-AI; remote player gets ControllerRemote in constructor
+            // Online PvP — both non-AI; remote player gets ControllerRemote in constructor.
+            // deck.rngRole is assigned inside the Player constructor via
+            // mp.roleOfId(id), so each deck shuffles from its per-role stream.
             player_me = new Player(0, "Player 1", me_deck, false);
             player_op = new Player(1, "Player 2", this.start_op_deck, false);
-            // Tag each player with its netplay role so deck shuffles use the
-            // correct per-role RNG stream (deckHost/deckGuest) and stay
-            // deterministic across both clients regardless of initialization
-            // order. Local player = our role, opponent = the other role.
-            if (typeof mp !== "undefined" && mp.active) {
-                player_me.mpRole = mp.role;
-                player_op.mpRole = (mp.role === "host") ? "guest" : "host";
-                // The Player constructors already initialized the decks via
-                // reset() with the game RNG stream (mpRole wasn't set yet).
-                // Re-initialize so each deck shuffles from its per-role stream.
-                player_me.reset();
-                player_op.reset();
-            }
         } else {
             // PVP
             player_me = new Player(0, "Player 1", me_deck, false);
