@@ -248,9 +248,12 @@ wss.on("connection", (sock, req) => {
                 socketRooms.set(sock, room);
                 console.log(`[join] ${sockLabel(sock, req)} room=${room.code}`);
                 sock.send(JSON.stringify({ type: "joined", code: room.code }));
-                // Notify host that a guest joined
+                // Notify BOTH peers that the room is full / opponent connected.
                 if (room.host && room.host.readyState === WebSocket.OPEN)
                     room.host.send(JSON.stringify({ type: "peer-joined" }));
+                // The joining guest also needs to know the host is present so
+                // its lobby can switch to the ready flow.
+                sock.send(JSON.stringify({ type: "peer-joined" }));
                 break;
             }
 
@@ -273,7 +276,9 @@ wss.on("connection", (sock, req) => {
                         console.log(`[quickmatch] ${sockLabel(partner, null)} + ${sockLabel(sock, req)} room=${room.code}`);
                         partner.send(JSON.stringify({ type: "created", code: room.code }));
                         sock.send(JSON.stringify({ type: "joined", code: room.code }));
+                        // Notify BOTH peers that the room is full.
                         partner.send(JSON.stringify({ type: "peer-joined" }));
+                        sock.send(JSON.stringify({ type: "peer-joined" }));
                     } else {
                         // Partner disconnected, queue self
                         quickMatchQueue.push(sock);

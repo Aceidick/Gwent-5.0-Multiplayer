@@ -5711,6 +5711,14 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
                 Lobby.ready();
                 return;
             }
+            // In Player vs Player mode, Start game is ONLY the online
+            // ready/rematch button — never vs AI. If no opponent is connected
+            // yet, prompt the player to use Online Multiplayer first.
+            if (window.__gwentStartMode === "pvp") {
+                if (typeof aviso === "function")
+                    aviso("Press 'Online Multiplayer' to find an opponent first.");
+                return;
+            }
             this.startNewGame(1);
         }, false);
 
