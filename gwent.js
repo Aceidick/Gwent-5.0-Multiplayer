@@ -7203,10 +7203,13 @@ var elem_principal = document.documentElement;
 
 async function openFullscreen() {
     try {
-        if (elem_principal.requestFullscreen) elem_principal.requestFullscreen();
+        if (elem_principal.requestFullscreen) await elem_principal.requestFullscreen();
         else if (elem_principal.webkitRequestFullscreen) elem_principal.webkitRequestFullscreen();
         else if (elem_principal.msRequestFullscreen) elem_principal.msRequestFullscreen();
-        await window.screen.orientation.lock("landscape");
+    } catch (err) { }
+    try {
+        if (window.screen && window.screen.orientation && window.screen.orientation.lock)
+            await window.screen.orientation.lock("landscape");
     } catch (err) { }
 }
 

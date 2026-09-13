@@ -134,8 +134,7 @@ var Net = {
     },
 
     settle(err, val) {
-        const p = this.pendi
-ng;
+        const p = this.pending;
         if (!p)
             return;
         this.pending = null;
