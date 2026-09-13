@@ -60,15 +60,14 @@ var Lobby = {
                         style="padding:6px 10px;font-size:13px;width:280px;background:#1a1812;color:#e8d5a3;border:1px solid #5a4f3a;text-align:center" />
                 </div>
             </div>
-            <div id="mp-ready" style="display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);max-width:520px;width:92%;padding:10px 18px;background:rgba(20,18,14,0.96);border:1px solid #8a6000;border-radius:8px;z-index:9999;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:auto">
-                <span id="mp-ready-status" style="font-size:14px;color:#e8d5a3;flex:1;min-width:200px;text-align:left"></span>
-                <button id="mp-ready-close" style="padding:8px 18px;font-size:13px;cursor:pointer;background:#2a251c;color:#e8d5a3;border:1px solid #8a6000">Leave</button>
+            <div id="mp-ready" style="display:none;position:fixed;left:50%;top:14px;transform:translateX(-50%);max-width:560px;width:92%;padding:8px 16px;background:rgba(20,18,14,0.96);border:1px solid #8a6000;border-radius:8px;z-index:10000;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;pointer-events:none">
+                <span id="mp-ready-status" style="font-size:14px;color:#e8d5a3;flex:1;min-width:200px;text-align:left;pointer-events:none"></span>
+                <button id="mp-ready-close" style="padding:6px 14px;font-size:13px;cursor:pointer;background:#2a251c;color:#e8d5a3;border:1px solid #8a6000;pointer-events:auto">Leave</button>
             </div>
         `;
         document.body.appendChild(ov);
         this.overlay = ov;
         this.findView = ov.querySelector("#mp-find");
-        this.readyBar = ov.querySelector("#mp-ready");
         this.status = ov.querySelector("#mp-status");
         this.codeDisplay = ov.querySelector("#mp-code-display");
         this.codeInput = ov.querySelector("#mp-code-input");
@@ -76,8 +75,18 @@ var Lobby = {
         this.btnJoin = ov.querySelector("#mp-join");
         this.btnQuick = ov.querySelector("#mp-quick");
         this.btnCancel = ov.querySelector("#mp-cancel");
+        // The ready bar is a separate top-of-screen element, kept OUTSIDE the
+        // lobby overlay so it can remain visible after the overlay is hidden
+        // (letting the deck-customization and Start game button be fully
+        // interactive while an opponent is connected). Resolve its child
+        // elements first, then move the bar out to document.body.
+        this.readyBar = ov.querySelector("#mp-ready");
         this.readyStatus = ov.querySelector("#mp-ready-status");
         this.readyClose = ov.querySelector("#mp-ready-close");
+        if (this.readyBar && this.readyBar.parentNode === ov)
+            ov.removeChild(this.readyBar);
+        if (this.readyBar)
+            document.body.appendChild(this.readyBar);
 
         this.btnCreate.addEventListener("click", () => this.createRoom());
         this.btnJoin.addEventListener("click", () => this.joinRoom());
@@ -89,25 +98,24 @@ var Lobby = {
 
     // Switch the lobby to the 'find opponent' full-screen view.
     _showFindView() {
-        if (this.findView) this.findView.style.display = "flex";
         if (this.readyBar) this.readyBar.style.display = "none";
-        // Full dark backdrop, block the deck builder behind.
         if (this.overlay) {
+            this.overlay.style.display = "flex";
             this.overlay.style.background = "rgba(10,12,18,0.94)";
             this.overlay.style.pointerEvents = "auto";
         }
+        if (this.findView) this.findView.style.display = "flex";
     },
 
-    // Switch to the compact 'ready' bar so the deck builder stays usable while
-    // waiting for the opponent / before pressing Start game. The overlay becomes
-    // transparent and click-through except for the ready bar itself.
+    // When an opponent is connected, hide the lobby overlay entirely so the
+    // deck-customization screen (and its Start game button) is fully
+    // interactive. Show only a small top status bar that does not cover the
+    // Start game button.
     _showReadyBar() {
         if (this.findView) this.findView.style.display = "none";
         if (this.readyBar) this.readyBar.style.display = "flex";
-        if (this.overlay) {
-            this.overlay.style.background = "transparent";
-            this.overlay.style.pointerEvents = "none";
-        }
+        // Hide the full-screen lobby overlay completely.
+        if (this.overlay) this.overlay.style.display = "none";
     },
 
     show() {
@@ -139,6 +147,7 @@ var Lobby = {
 
     close() {
         if (this.overlay) this.overlay.style.display = "none";
+        if (this.readyBar) this.readyBar.style.display = "none";
         if (Net.code) Net.leave();
         this._reset();
     },
@@ -233,16 +242,14 @@ var Lobby = {
         this.peerReady = false;
         this.ready = false;
         this.remoteDeck = null;
-        this._showReadyState();
         if (this.readyStatus)
             this.readyStatus.textContent = "Opponent disconnected. You can close or wait for a new opponent.";
         setTimeout(() => {
             // Back to the find view so the player can look for a new opponent.
-            if (this.overlay && this.overlay.style.display !== "none" && !mp.active) {
+            if (!mp.active)
                 this._showFindView();
-                this._setStatus("Opponent disconnected. Find a new opponent or close.");
-            }
-        }, 1800);
+            this._setStatus("Opponent disconnected. Find a new opponent or close.");
+        }, 1200);
     },
 
     // Whether the local player can use 'Start game' to ready up (an opponent
@@ -266,7 +273,6 @@ var Lobby = {
         if (!Net.connected || Net.code === null) return;
         this.ready = false;
         this.peerReady = false;
-        this.overlay.style.display = "flex";
         this._showReadyBar();
         this._showReadyState();
     },
@@ -372,8 +378,9 @@ var Lobby = {
         // Activate multiplayer session
         mp.activate(Net.role);
 
-        // Hide lobby
-        this.overlay.style.display = "none";
+        // Hide lobby and ready bar
+        if (this.overlay) this.overlay.style.display = "none";
+        if (this.readyBar) this.readyBar.style.display = "none";
 
         // Reset the game state before starting (important for rematches, so
         // the board/scores are cleared from the previous match).
