@@ -96,6 +96,7 @@ var Net = {
         } catch (e) {
             return;
         }
+        console.log("[net] route type=" + msg.type + " onMessage=" + (typeof this.onMessage));
         switch (msg.type) {
             case "created":
                 this.code = msg.code;

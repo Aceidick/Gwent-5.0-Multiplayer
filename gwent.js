@@ -5699,18 +5699,25 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
 
         document.getElementById("start-game").addEventListener("click", () => {
             actualizartituloporid();
+            console.log("[start-game] clicked mode=" + window.__gwentStartMode
+                + " connected=" + (typeof Net !== "undefined" && Net.connected)
+                + " code=" + (typeof Net !== "undefined" ? Net.code : "?" )
+                + " mp.active=" + (typeof mp !== "undefined" && mp.active));
             // If an online match just ended, 'Start game' requests a rematch
             // on the same connection.
             if (typeof Lobby !== "undefined" && Lobby.canRematch()) {
+                console.log("[start-game] -> rematch");
                 Lobby.rematch();
                 return;
             }
             // If an online opponent is connected and waiting, 'Start game'
             // acts as the ready/start button for the online match.
             if (typeof Lobby !== "undefined" && Lobby.canReady()) {
+                console.log("[start-game] -> Lobby.ready()");
                 Lobby.ready();
                 return;
             }
+            console.log("[start-game] canReady=false canRematch=false");
             // In Player vs Player mode, Start game is ONLY the online
             // ready/rematch button — never vs AI. If no opponent is connected
             // yet, prompt the player to use Online Multiplayer first.

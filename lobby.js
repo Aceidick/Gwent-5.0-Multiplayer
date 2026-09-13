@@ -226,8 +226,9 @@ var Lobby = {
     },
 
     _onPeerJoined() {
-        // Opponent connected. Switch to the compact ready bar so the player
-        // can finish building their deck, then press 'Start game' to ready up.
+        console.log("[lobby] peer-joined  connected=" + Net.connected + " code=" + Net.code + " role=" + Net.role);
+        // Opponent connected. Hide the lobby overlay so the deck-customization
+        // and Start game button are fully interactive.
         this.peerReady = false;
         this.ready = false;
         this.remoteDeck = null;
@@ -255,7 +256,9 @@ var Lobby = {
     // Whether the local player can use 'Start game' to ready up (an opponent
     // is connected and the match hasn't started yet).
     canReady() {
-        return Net.connected && Net.code !== null && !mp.active && !this.ready;
+        let r = Net.connected && Net.code !== null && !mp.active && !this.ready;
+        if (!r) console.log("[lobby] canReady=false connected=" + Net.connected + " code=" + Net.code + " mp.active=" + mp.active + " ready=" + this.ready);
+        return r;
     },
 
     // Whether the local player can press 'Start game' to start a rematch on
@@ -290,9 +293,11 @@ var Lobby = {
     // Called when the local player presses 'Start game' while connected to an
     // opponent. Sends the local deck and marks the player as ready.
     ready() {
+        console.log("[lobby] ready() called  alreadyReady=" + this.ready);
         if (this.ready) return;
         // Validate the deck one more time before sending.
         if (typeof dm !== "undefined" && dm.stats) {
+            console.log("[lobby] ready() deck units=" + dm.stats.units + " special=" + dm.stats.special);
             if (dm.stats.units < 22) {
                 if (typeof aviso === "function") aviso("Your deck must have at least 22 unit cards.");
                 return;
@@ -304,6 +309,7 @@ var Lobby = {
         }
         let raw = dm.deckToJSON();
         this.localDeck = (typeof raw === "string") ? JSON.parse(raw) : raw;
+        console.log("[lobby] sending lobby-ready deck=" + JSON.stringify(this.localDeck));
         Net.send({ t: "lobby-ready", deck: this.localDeck });
         this.ready = true;
         this._showReadyState();
@@ -323,9 +329,11 @@ var Lobby = {
     },
 
     _onMessage(data) {
+        console.log("[lobby] _onMessage t=" + data.t);
         if (data.t === "lobby-ready") {
             this.remoteDeck = (typeof data.deck === "string") ? JSON.parse(data.deck) : data.deck;
             this.peerReady = true;
+            console.log("[lobby] peer ready, remoteDeck faction=" + (this.remoteDeck && this.remoteDeck.faction));
             this._showReadyState();
             this._maybeStart();
         } else if (data.t === "lobby-rematch") {
@@ -335,6 +343,7 @@ var Lobby = {
             this._maybeStart();
         } else if (data.t === "lobby-start") {
             // Guest receives seed from host
+            console.log("[lobby] lobby-start seed=" + data.seed + " role=" + Net.role);
             if (Net.role === "guest") {
                 this._startMatch(data.seed);
             }
@@ -346,10 +355,12 @@ var Lobby = {
 
     _maybeStart() {
         // Only start once both players are ready (decks exchanged).
+        console.log("[lobby] _maybeStart ready=" + this.ready + " peerReady=" + this.peerReady + " remoteDeck=" + !!this.remoteDeck + " role=" + Net.role);
         if (!this.ready || !this.peerReady || !this.remoteDeck) return;
         if (Net.role === "host") {
             // Host generates seed and starts; guest starts on lobby-start.
             let seed = GameRNG.randomSeed();
+            console.log("[lobby] host starting match seed=" + seed);
             Net.send({ t: "lobby-start", seed: seed });
             this._startMatch(seed);
         }
@@ -357,6 +368,7 @@ var Lobby = {
     },
 
     _startMatch(seed) {
+        console.log("[lobby] _startMatch seed=" + seed + " role=" + Net.role);
         this._setStatus("Starting match...");
 
         // Convert remote deck wire format to engine deck format
