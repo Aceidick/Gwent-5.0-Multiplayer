@@ -59,6 +59,31 @@
         font-size: 140%; 
         vertical-align: middle; 
     }
+
+        #front-buttons {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+            margin-top: 10px;
+        }
+        .front-btn {
+            font-family: 'GwentCustom', serif;
+            font-size: 1.15rem;
+            letter-spacing: 1px;
+            color: #e8d5a3;
+            background: linear-gradient(to bottom, #3a3528 0%, #2a251c 100%);
+            border: 2px solid #8a6000;
+            padding: 12px 40px;
+            cursor: pointer;
+            text-align: center;
+            min-width: 280px;
+            transition: filter 0.15s ease, transform 0.1s ease;
+            filter: drop-shadow(2px 2px 2px rgba(0,0,0,0.8));
+        }
+        .front-btn:hover { filter: brightness(1.25) drop-shadow(2px 2px 2px rgba(0,0,0,0.8)); }
+        .front-btn:active { transform: translateY(1px); }
+        #front-pvp { border-color: #b58f00; }
     </style>
 
 </head>
@@ -72,6 +97,10 @@
                 </span>
                 <br />
                 <font id="load_text">Loading v5.0...</font>
+                <div id="front-buttons" style="display:none">
+                    <button class="front-btn" id="front-pvc">Player vs Computer</button>
+                    <button class="front-btn" id="front-pvp">Player vs Player</button>
+                </div>
                 <button class="start-game_class" id="button_start" style="display:none">LET'S PLAY</button>
                 <div id="version_text">v5.0</div>
             </div>
@@ -199,8 +228,7 @@
 			</section>
 			<div id = "hand-op"></div>
 			<section class = "card-preview hide">
-				<div class = "card-lg" id = "n
-o_hover"></div>
+				<div class = "card-lg" id = "no_hover"></div>
 				<div class = "card-description">
 					<div></div>
 					<h1></h1>
@@ -256,8 +284,7 @@ o_hover"></div>
           </div>
 				</div>
 			</section>
-			<section id = "notifica
-tion-bar" class = "hide">
+			<section id = "notification-bar" class = "hide">
 				<div></div>
 			</section>
       <section id = "helper-box" class = "center hide">
@@ -325,8 +352,7 @@ tion-bar" class = "hide">
 
 
 
-            <a id="s
-elect-deck" class="deck-options">Select Own Deck</a>
+            <a id="select-deck" class="deck-options">Select Own Deck</a>
 
             <label id="upload-deck" class="deck-options">
                 <input type="file" id="add-file" value="Import" style="display:none;" />
@@ -362,13 +388,10 @@ elect-deck" class="deck-options">Select Own Deck</a>
                 <p>0</p>
             </div>
             <button id="start-game" class="start-game_class">Start game</button>
-            <button id="start-ai-game" class="start-game_class">Start AI game</button>
-            <button id="start-pvp-game" class="start-game_class">Start PvP game</button>
-            <button id="start-online-game" class="start-game_class">Play Online</button>
+            <button id="start-online-game" class="start-game_class">Online Multiplayer</button>
         </section>
 		<div id="toggle-music" class="center music-customization" style="display:none; cursor:default !important; display: flex; gap: 8px; align-items: center;">
-    <span id="btn-play" style="fo
-nt-size: 0.8em;">♫</span>
+    <span id="btn-play" style="font-size: 0.8em;">♫</span>
     <span id="btn-skip" style="font-size: 0.6em;">⏭</span>
 </div>
 		<script type = "text/javascript" src = "rng.js"></script>

@@ -49,6 +49,11 @@ var Lobby = {
                 <button id="mp-join" style="padding:10px 22px;font-size:15px;cursor:pointer;background:#3a3528;color:#e8d5a3;border:1px solid #5a4f3a">Join</button>
             </div>
             <button id="mp-cancel" style="margin-top:24px;padding:8px 20px;font-size:13px;cursor:pointer;background:none;color:#7a6e58;border:1px solid #3a3528">Cancel</button>
+            <div style="margin-top:20px;display:flex;flex-direction:column;align-items:center;gap:6px;max-width:480px">
+                <label for="mp-server-url" style="font-size:12px;color:#7a6e58">Relay server (optional — leave blank to auto-detect)</label>
+                <input id="mp-server-url" placeholder="ws://host:port" spellcheck="false"
+                    style="padding:6px 10px;font-size:13px;width:280px;background:#1a1812;color:#e8d5a3;border:1px solid #5a4f3a;text-align:center" />
+            </div>
         `;
         document.body.appendChild(ov);
         this.overlay = ov;
@@ -84,6 +89,12 @@ var Lobby = {
         this.status.textContent = "Connect to a relay server to play online.";
         this.codeDisplay.style.display = "none";
         this.codeInput.value = "";
+        let urlInput = this.overlay.querySelector("#mp-server-url");
+        if (urlInput) {
+            let saved = (typeof localStorage !== "undefined")
+                ? localStorage.getItem("gc-server-url") : null;
+            urlInput.value = saved || "";
+        }
     },
 
     close() {
@@ -103,15 +114,24 @@ var Lobby = {
         if (this.status) this.status.textContent = msg;
     },
 
+    _resolveServerURL() {
+        let urlInput = this.overlay && this.overlay.querySelector("#mp-server-url");
+        let url = urlInput ? urlInput.value.trim() : "";
+        if (url && typeof localStorage !== "undefined")
+            localStorage.setItem("gc-server-url", url);
+        return url || null;
+    },
+
     async _ensureConnected() {
         if (Net.connected) return true;
+        let url = this._resolveServerURL();
         this._setStatus("Connecting to relay server...");
         try {
-            await Net.connect();
+            await Net.connect(url);
             this._setStatus("Connected! Choose how to find an opponent.");
             return true;
         } catch (e) {
-            this._setStatus("Could not reach the relay server. Check the server URL (?server=ws://host:port).");
+            this._setStatus("Could not reach the relay server. Check the server URL or leave it blank to auto-detect.");
             return false;
         }
     },
@@ -171,14 +191,15 @@ var Lobby = {
 
     _exchangeDecks() {
         // Build local deck JSON from DeckMaker
-        this.localDeck = dm.deckToJSON();
+        let raw = dm.deckToJSON();
+        this.localDeck = (typeof raw === "string") ? JSON.parse(raw) : raw;
         Net.send({ t: "lobby-ready", deck: this.localDeck });
         this._setStatus("Waiting for opponent's deck...");
     },
 
     _onMessage(data) {
         if (data.t === "lobby-ready") {
-            this.remoteDeck = data.deck;
+            this.remoteDeck = (typeof data.deck === "string") ? JSON.parse(data.deck) : data.deck;
             this._setStatus("Received opponent's deck. Preparing match...");
             this._maybeStart();
         } else if (data.t === "lobby-start") {

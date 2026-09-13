@@ -3293,6 +3293,7 @@ if (canVibrate) navigator.vibrate(1000);
 actualizarPosicionMusicaMovel();
         this.endScreen.classList.add("hide");
         document.getElementById("deck-customization").classList.remove("hide");
+        if (typeof applyStartMode === "function") applyStartMode();
     }
 
     // Restarts the last game with the same decks
@@ -4063,13 +4064,9 @@ let cardLeaderMenu = document.getElementById("card-leader");
 					startGameBtn.style.transform = "translateY(-5.8vw)";
 				}
 
-				let startAIGameBtn = document.getElementById("start-ai-game");
-				if (startAIGameBtn) {
-					startAIGameBtn.style.display = "none";
-				}
-let startPvPGameBtn = document.getElementById("start-pvp-game");
-				if (startPvPGameBtn) {
-					startPvPGameBtn.style.display = "none";
+				let startOnlineBtn = document.getElementById("start-online-game");
+				if (startOnlineBtn) {
+					startOnlineBtn.style.transform = "translateY(-5.8vw)";
 				}
 
 
@@ -5697,8 +5694,6 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
         };
 
         document.getElementById("start-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(1); }, false);
-        document.getElementById("start-ai-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(2); }, false);
-        document.getElementById("start-pvp-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(3); }, false);
 
         let onlineBtn = document.getElementById("start-online-game");
         if (onlineBtn)
@@ -7277,6 +7272,18 @@ async function cartaNaLinha(id, carta) {
 	}
 }
 
+function applyStartMode() {
+    let mode = window.__gwentStartMode || "computer";
+    let startBtn = document.getElementById("start-game");
+    let onlineBtn = document.getElementById("start-online-game");
+    if (mode === "pvp") {
+        if (startBtn) startBtn.style.display = "none";
+        if (onlineBtn) onlineBtn.style.display = "";
+    } else {
+        if (startBtn) startBtn.style.display = "";
+        if (onlineBtn) onlineBtn.style.display = "none";
+    }
+}
 function inicio() {
     var classe = document.getElementsByClassName("abs");
     for (var i = 0; i < classe.length; i++) classe[i].style.display = "none";
@@ -7284,6 +7291,7 @@ function inicio() {
     tocar("menu_opening", false);
     openFullscreen();
     iniciarMusica();
+    applyStartMode();
 }
 
 function iniciarMusica() {
@@ -7308,14 +7316,30 @@ window.onload = function () {
     dimensionar();
     playingOnline = window.location.href == "https://randompianist.github.io/gwent-classic-v2.0/";
     document.getElementById("load_text").style.display = "none";
-    document.getElementById("button_start").style.display = "inline-block";
     document.getElementById("deck-customization").style.display = "";
     document.getElementById("toggle-music").style.display = "";
     document.getElementsByTagName("main")[0].style.display = "";
+    let frontButtons = document.getElementById("front-buttons");
+    if (frontButtons) {
+        frontButtons.style.display = "flex";
+        let pvcBtn = document.getElementById("front-pvc");
+        let pvpBtn = document.getElementById("front-pvp");
+        if (pvcBtn)
+            pvcBtn.addEventListener("click", function () {
+                window.__gwentStartMode = "computer";
+                inicio();
+            });
+        if (pvpBtn)
+            pvpBtn.addEventListener("click", function () {
+                window.__gwentStartMode = "pvp";
+                inicio();
+            });
+    } else {
+        document.getElementById("button_start").style.display = "inline-block";
+    }
     document.getElementById("button_start").addEventListener("click", function () {
 if (typeof window !== "undefined" && window.Website2APK && typeof window.Website2APK.vibrate === "function") {
-window.Website2APK.vibrate(60); 
-		} else if (navigator.vibrate) {
+window.Website2APK.vibrate(60); 		} else if (navigator.vibrate) {
 			navigator.vibrate(60);
 		}
         inicio();
