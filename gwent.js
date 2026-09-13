@@ -417,7 +417,7 @@ class ControllerAI {
         let data_max = this.getMaximums();
         let data_board = this.getBoardData();
         if (src && src !== card.holder.hand)
-            board.moveTo(card, card.holder.hand, src);
+            await board.moveTo(card, card.holder.hand, src);
         await this.playCard(card, data_max, data_board)
     }
 
@@ -524,7 +524,8 @@ class ControllerAI {
                 }
             }
             targ.decoyTarget = true;
-            setTimeout(() => board.toHand(targ, row), 1000);
+            await sleep(1000);
+            await board.toHand(targ, row);
         } else {
             row = ["close", "agile", "agile_cr", "agile_cs", "agile_crs"].includes(card.row) ? board.getRow(card, "close", this.player) : ["ranged", "agile_rs"].includes(card.row) ? board.getRow(card, "ranged", this.player) : board.getRow(card, "siege", this.player);
         }
@@ -1151,11 +1152,6 @@ class Player {
                 this.hand = new Hand(document.getElementById("op-hand-row"), this.tag);
                 document.getElementById("op-hand-row").classList.add("human-op"); // This a playable opponent hand
             }
-        } else if (game.mode === 4) {
-            // Online PvP — local player gets visible hand, remote gets hidden
-            this.hand = (id === 0) ? new Hand(document.getElementById("hand-row"), this.tag) : new HandAI(this.tag);
-            if (id === 1 && typeof ControllerRemote !== "undefined")
-                this.controller = new ControllerRemote(this);
         } else {
             this.hand = (id === 0) ? new Hand(document.getElementById("hand-row"), this.tag) : new HandAI(this.tag);
         }
@@ -1267,11 +1263,17 @@ class Player {
         this.winning = isWinning;
     }
 
-    // Puts the player in the passed state
+    // Puts the player in the passed state.
+    // IMPORTANT: this must be idempotent. The old implementation toggled the
+    // DOM class only when the model boolean changed. If UI and model ever got
+    // out of sync (for example after rematch/reset), passing would REMOVE the
+    // banner and resetting would ADD it again. Force the DOM to the requested
+    // state every time instead of relying on previous UI state.
     setPassed(hasPassed) {
-        if (this.passed ^ hasPassed)
-            document.getElementById("passed-" + this.tag).classList.toggle("passed");
+        hasPassed = !!hasPassed;
         this.passed = hasPassed;
+        const elem = document.getElementById("passed-" + this.tag);
+        if (elem) elem.classList.toggle("passed", hasPassed);
     }
 
     // Sets up board for turn
@@ -1285,9 +1287,7 @@ class Player {
             may_pass1 = true;
         }
 
-        if (this.controller && this.controller.isRemote) {
-            await this.controller.startTurn(this);
-        } else if (this.controller instanceof ControllerAI) {
+        if (this.controller instanceof ControllerAI) {
             await this.controller.startTurn(this);
         } else {
             // If there is a pending forced action, do it or pass
@@ -1626,7 +1626,10 @@ async playCull(card) {
         let factionData = factions[this.deck.faction];
         if (factionData.activeAbility && this.factionAbilityUses > 0) {
             this.endTurnAfterAbilityUse = true;
-            await factionData.factionAbility(this);
+            if (await factionData.factionAbility(this) === false) {
+                ui.enablePlayer(true);
+                return false;
+            }
             this.updateFactionAbilityUses(this.factionAbilityUses - 1);
             // Some faction abilities require extra interractions
             if (this.endTurnAfterAbilityUse)
@@ -1694,7 +1697,7 @@ async playCull(card) {
         this.endturn_action = async () => {
             this.endturn_action = null;
             if (callback)
-                callback();
+                await callback();
         }
         ui.enablePlayer(true);
     }
@@ -1743,11 +1746,12 @@ class CardContainer {
             return [];
         if (!n || n === 1)
             return [valid[randomInt(valid.length)]];
-        // Deterministic shuffle (Fisher-Yates) then select first n items
+        // Randum shuffle then select first n items
         valid = [...valid];
-        for (let j = valid.length - 1; j > 0; j--) {
-            let k = randomInt(j + 1);
-            [valid[j], valid[k]] = [valid[k], valid[j]];
+        // Fixed RNG consumption across browser engines (Fisher-Yates).
+        for (let i = valid.length - 1; i > 0; --i) {
+            const j = randomInt(i + 1);
+            [valid[i], valid[j]] = [valid[j], valid[i]];
         }
         return valid.slice(0, n);
     }
@@ -2246,8 +2250,8 @@ class Row extends CardContainer {
                     this.effects.ambush = false;
                 // Owner draws 2 cards
                 await targetCard.animate("ambush");
-                targetCard.holder.deck.draw(targetCard.holder.hand);
-                targetCard.holder.deck.draw(targetCard.holder.hand);
+                await targetCard.holder.deck.draw(targetCard.holder.hand);
+                await targetCard.holder.deck.draw(targetCard.holder.hand);
                 // Cards goes to the grave
                 await board.toGrave(targetCard, targetCard.currentLocation);
                 
@@ -2461,16 +2465,20 @@ class Row extends CardContainer {
     // Applies a local scorch effect to this row
     async scorch() {
         if (this.total >= 10 && !this.isShielded() && !game.scorchCancelled)
-            await Promise.all(this.maxUnits().map(async c => {
+            await resolveInOrder(this.maxUnits(), async c => {
                 await c.animate("scorch", true, false);
                 await board.toGrave(c, this);
-            }));
+            });
     }
 
     // Removes all cards and effects from this row
-    clear() {
-        this.special.cards.filter(c => !c.noRemove).forEach(c => board.toGrave(c, this, true));
-        this.cards.filter(c => !c.noRemove).forEach(c => board.toGrave(c, this, true));
+    async clear() {
+        // Round cleanup must be fully settled before the next round begins.
+        // Copy the arrays first because board.toGrave() mutates the containers.
+        const specials = this.special.cards.filter(c => !c.noRemove).slice();
+        const units = this.cards.filter(c => !c.noRemove).slice();
+        for (const c of specials) await board.toGrave(c, this, true);
+        for (const c of units) await board.toGrave(c, this, true);
     }
 
     // Returns all regular unit cards with the heighest power
@@ -2671,7 +2679,7 @@ class Weather extends CardContainer {
 
     // Removes all weather effects and cards
     async clearWeather() {
-        await Promise.all(this.cards.map((c, i) => this.cards[this.cards.length - i - 1]).map(c => board.toGrave(c, this)));
+        await resolveInOrder(this.cards.map((c, i) => this.cards[this.cards.length - i - 1]), c => board.toGrave(c, this));
 const canVibrate = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
 if (canVibrate) navigator.vibrate(80);
     }
@@ -2808,6 +2816,8 @@ class Board {
             await dest.addCard(source ? source.removeCard(card) : card); //Only the override in the Row/Weather classes are asynchronous
         else
             dest.addCard(source ? source.removeCard(card) : card);
+        if (card.banishFromGrave && dest === card.holder.grave && dest.cards.includes(card))
+            dest.removeCard(card);
     }
 
     // Sends and translates a card from the source to a specified row name or CardContainer - NO EFFECTS/ABILITIES
@@ -2821,6 +2831,8 @@ class Board {
             await dest.addCard(source ? source.removeCard(card, false) : card, false); //Only the override in the Row/Weather classes are asynchronous
         else
             dest.addCard(source ? source.removeCard(card) : card);
+        if (card.banishFromGrave && dest === card.holder.grave && dest.cards.includes(card))
+            dest.removeCard(card);
     }
 
     // Sends and translates a card from the source to a row name associated with the passed player
@@ -2929,7 +2941,10 @@ class Game {
     }
 
     reset() {
-        this.firstPlayer;
+        // A new game must never retain a Player object from the previous match.
+        // Keeping the stale reference makes both online clients resolve the next
+        // opening turn from their own local perspective and deadlock.
+        this.firstPlayer = null;
         this.currPlayer = null;
 
         this.gameStart = [];
@@ -3013,20 +3028,13 @@ actualizarPosicionMusicaMovel();
         if (!this.firstPlayer)
             this.firstPlayer = await this.coinToss();
         if (special_abilities["meve_white_queen"]) await ui.notification("meve_white_queen", 1200);
-        this.initialRedraw();
+        await this.initialRedraw();
         somCarta();
     }
 
     // Simulated coin toss to determine who starts game
     async coinToss() {
-        if (typeof mp !== "undefined" && mp.active) {
-            // Role-relative: 0 = host starts, 1 = guest starts
-            let starter = GameRNG.game.int(2);
-            let iAmHost = mp.role === "host";
-            this.firstPlayer = (starter === 0) === iAmHost ? player_me : player_op;
-        } else {
-            this.firstPlayer = (Math.random() < 0.5) ? player_me : player_op;
-        }
+        this.firstPlayer = ((window.GwentOnline && GwentOnline.active ? GwentOnline.random() : Math.random()) < 0.5) ? player_me : player_op;
 tocar("coin", false);
         await ui.notification(this.firstPlayer.tag + "-coin", 1200);
         return this.firstPlayer;
@@ -3066,33 +3074,27 @@ tocar("coin", false);
             }
         } else {
             // player vs player - both have a redraw - player 1 first
-            if (this.mode === 3 || this.mode === 4) {
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = mp.role;
+            if (this.mode === 3) {
                 if (player_me.leader.key === "sc_francesca_daisy") {
-                    await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 1 - Choose " + myCount +" cards to put back to deck.");
+                    await ui.queueCarousel(player_me.hand, myCount, async (c, i) => player_me.deck.addCard(c.removeCard(i)), c => true, true, false, "Player 1 - Choose " + myCount +" cards to put back to deck.", true);
                 } else {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await player_me.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 1 - Choose up to " + myCount +" cards to redraw.");
                 }
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = (mp.role === "host") ? "guest" : "host";
                 if (player_op.leader.key === "sc_francesca_daisy") {
-                    await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Player 2 - Choose " + opCount +" cards to put back to deck.");
+                    await ui.queueCarousel(player_op.hand, opCount, async (c, i) => player_op.deck.addCard(c.removeCard(i)), c => true, true, false, "Player 2 - Choose " + opCount +" cards to put back to deck.", true);
                 } else {
                     await ui.queueCarousel(player_op.hand, opCount, async (c, i) => await player_op.deck.swap(c, c.removeCard(i)), c => true, true, true, "Player 2 - Choose up to " + opCount +" cards to redraw.");
                 }
-                if (this.mode === 4 && mp.active)
-                    mp._shuffleRole = null;
             } else {
                 if (player_me.leader.key === "sc_francesca_daisy") {
-                    await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await board.toDeck(c.cards[i], c), c => true, true, false, "Choose " + myCount +" cards to put back to deck.");
+                    await ui.queueCarousel(player_me.hand, myCount, async (c, i) => player_me.deck.addCard(c.removeCard(i)), c => true, true, false, "Choose " + myCount +" cards to put back to deck.", true);
                 } else {
                     await ui.queueCarousel(player_me.hand, myCount, async (c, i) => await player_me.deck.swap(c, c.removeCard(i)), c => true, true, true, "Choose up to " + myCount +" cards to redraw.");
                 }
             }
             ui.enablePlayer(false);
         }
-        game.startRound();
+        await game.startRound();
     }
 
         async startRound(verdict = false) {
@@ -3104,6 +3106,12 @@ tocar("coin", false);
         }
         player_me.roundStartReset();
         player_op.roundStartReset();
+
+        // A new round always begins unpassed. Force both the model and the
+        // visual badge to the same state before round-start effects run.
+        // Players that genuinely cannot act are marked passed below.
+        player_me.setPassed(false);
+        player_op.setPassed(false);
 
         await this.runEffects(this.roundStart);
 
@@ -3124,7 +3132,7 @@ tocar("coin", false);
         if (this.currPlayer.opponent().passed)
             await ui.notification(this.currPlayer.tag + "-turn", 1200);
 
-        this.startTurn();
+        await this.startTurn();
     }
 
 
@@ -3165,9 +3173,9 @@ if (!noEffects)
             await ui.notification(this.currPlayer.tag + "-pass", 1200);
         board.updateScores();
         if (player_op.passed && player_me.passed)
-            this.endRound();
+            await this.endRound();
         else
-            this.startTurn();
+            await this.startTurn();
     }
 
     // Ends the round and may end the game. Determines final scores and the round winner.
@@ -3204,8 +3212,8 @@ if (!noEffects)
         if (player_me.health === 0 || player_op.health === 0)
             this.over = true;
 
-        weather.clearWeather();
-               board.row.forEach(row => {
+        await weather.clearWeather();
+               await Promise.all(board.row.map(async row => {
             if (row) {
                 if (row.effects) {
                     row.effects.weather = false;
@@ -3219,11 +3227,11 @@ if (!noEffects)
                 }
             }
             
-            row.clear();
+            await row.clear();
             row.cards.forEach(c => {
                 c.power = c.basePower;
             });
-        });
+        }));
 		const canVibrate = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
 
         if (dif > 0) {
@@ -3241,9 +3249,9 @@ if (canVibrate) navigator.vibrate(200);
             await ui.notification("draw-round", 1200);
 }
         if (player_me.health === 0 || player_op.health === 0)
-            this.endGame();
+            await this.endGame();
         else
-            this.startRound(verdict);
+            await this.startRound(verdict);
     }
 
     // Sets up and displays the end-game screen
@@ -3857,17 +3865,19 @@ if (giveupBtn) {
         }
 
         if (typeof player_me !== "undefined") {
-            player_me.passed = false;
             if (typeof player_me.setPassed === "function") {
                 player_me.setPassed(false);
+            } else {
+                player_me.passed = false;
             }
             let elMe = document.getElementById("passed-" + player_me.tag);
             if (elMe) elMe.classList.remove("passed");
         }
         if (typeof player_op !== "undefined") {
-            player_op.passed = false;
             if (typeof player_op.setPassed === "function") {
                 player_op.setPassed(false);
+            } else {
+                player_op.passed = false;
             }
             let elOp = document.getElementById("passed-" + player_op.tag);
             if (elOp) elOp.classList.remove("passed");
@@ -3961,17 +3971,19 @@ if (giveupBtnMobile) {
         }
 
         if (typeof player_me !== "undefined") {
-            player_me.passed = false;
             if (typeof player_me.setPassed === "function") {
                 player_me.setPassed(false);
+            } else {
+                player_me.passed = false;
             }
             let elMe = document.getElementById("passed-" + player_me.tag);
             if (elMe) elMe.classList.remove("passed");
         }
         if (typeof player_op !== "undefined") {
-            player_op.passed = false;
             if (typeof player_op.setPassed === "function") {
                 player_op.setPassed(false);
+            } else {
+                player_op.passed = false;
             }
             let elOp = document.getElementById("passed-" + player_op.tag);
             if (elOp) elOp.classList.remove("passed");
@@ -4027,9 +4039,7 @@ if (typeof player_op !== "undefined") {
         this.toggleMusic_elem = document.getElementById("toggle-music");
         this.toggleMusic_elem.classList.add("fade");
         document.getElementById("arrangementWindow-button").addEventListener("click", () => {
-            this.updateArrangementCounter(0);
-            this.underRearrangement = false;
-            game.currPlayer.endTurn();
+            this.finishBoardRearrangement(true);
         }, false);
 
         this.helper = new HelperBox();
@@ -4062,15 +4072,10 @@ let cardLeaderMenu = document.getElementById("card-leader");
 				if (startGameBtn) {
 					startGameBtn.style.transform = "translateY(-5.8vw)";
 				}
-
-				let startAIGameBtn = document.getElementById("start-ai-game");
-				if (startAIGameBtn) {
-					startAIGameBtn.style.display = "none";
-				}
 let startPvPGameBtn = document.getElementById("start-pvp-game");
-				if (startPvPGameBtn) {
-					startPvPGameBtn.style.display = "none";
-				}
+                if (startPvPGameBtn && window.GwentPlayMode !== "friend") {
+                    startPvPGameBtn.style.display = "none";
+                }
 
 
 			}
@@ -4204,7 +4209,7 @@ font-size: 11px !important;
 					transform: scale(0.82) !important;
 					transform-origin: top center !important;
 					}
-#button_start {
+#play-mode-buttons {
        margin-top: -43px !important;
 }
 #end-screen button {
@@ -4352,7 +4357,7 @@ let row = this.lastRow;
         if (this.underCardPowerEdit) {
             if (this.previewCard == null) {
                 this.showPreviewVisuals(card);
-                ui.editCardPower(card);
+                await ui.editCardPower(card);
             }
             return;
         }
@@ -4365,7 +4370,7 @@ let row = this.lastRow;
             this.hidePreview(card);
             this.enablePlayer(false);
             card.decoyTarget = true;
-            board.toHand(card, row);
+            await board.toHand(card, row);
             await board.moveTo(pCard, row, pCard.holder.hand);
             await pCard.holder.endTurn();
         } else if (pCard.abilities.includes("alzur_maker")) {
@@ -4385,7 +4390,7 @@ let row = this.lastRow;
         if (this.underRearrangement) {
             if (this.previewCard !== null) {
                 if (row !== this.previewCard.currentLocation) {
-                    board.moveToNoEffects(this.previewCard, row, this.previewCard.currentLocation);
+                    await board.moveToNoEffects(this.previewCard, row, this.previewCard.currentLocation);
                     this.updateArrangementCounter(this.arrangementMoves - 1);
                 }
                 this.preview.classList.add("hide");
@@ -4393,9 +4398,7 @@ let row = this.lastRow;
                 this.previewCard = null;
                 this.lastRow = null;
                 if (this.arrangementMoves < 1) {
-                    this.underRearrangement = false;
-                    ui.helper.hide();
-                    await holder.endTurn();
+                    await this.finishBoardRearrangement();
                 }
             }
             return;
@@ -4476,9 +4479,7 @@ let row = this.lastRow;
         } else if (card.abilities.includes("meve_princess") || card.abilities.includes("carlo_varese")) {
             this.hidePreview(card);
             this.enablePlayer(false);
-            if (game.scorchCancelled)
-                return;
-            await row.scorch();
+            if (!game.scorchCancelled) await row.scorch();
         } else if (card.abilities.includes("cyrus_hemmelfart")) {
             this.hidePreview(card);
             this.enablePlayer(false);
@@ -4677,7 +4678,9 @@ navigator.vibrate(50);
             lCard = card.name;
             let container = new CardContainer();
             container.cards.push(card);
-            await this.viewCardsInContainer(container, action);
+            // This API previews a card locally; gameplay carousels, including
+            // a choice between leaders, must keep their normal synchronization.
+            await this.queueCarousel(container, 1, action || (() => {}), () => true, false, true, undefined, false, true);
         }
     }
 
@@ -4691,7 +4694,7 @@ navigator.vibrate(50);
 
     // Displays a Carousel menu of filtered container items that match the predicate.
     // Suspends gameplay until the Carousel is closed. Automatically picks random card if activated for AI player
-    async queueCarousel(container, count, action, predicate, bSort, bQuit, title) {
+    async queueCarousel(container, count, action, predicate, bSort, bQuit, title, bRedraw = false) {
         /*if (game.currPlayer && game.currPlayer.controller instanceof ControllerAI) {
             for (let i = 0; i < count; ++i) {
                 let cards = container.cards.reduce((a, c, i) => !predicate || predicate(c) ? a.concat([i]) : a, []);
@@ -4699,14 +4702,13 @@ navigator.vibrate(50);
             }
             return;
         }*/
-        let carousel = new Carousel(container, count, action, predicate, bSort, bQuit, title);
+        let carousel = new Carousel(container, count, action, predicate, bSort, bQuit, title, bRedraw);
         if (Carousel.curr === undefined || Carousel.curr === null) {
             carousel.start();
         } else {
             this.carousels.push(carousel);
-            return;
         }
-        await sleepUntil(() => this.carousels.length === 0 && !Carousel.curr, 100);
+        await carousel.completion;
     }
 
     // Starts the next queued Carousel
@@ -4720,6 +4722,7 @@ navigator.vibrate(50);
     async popup(yesName, yes, noName, no, title, description) {
         let p = new Popup(yesName, yes, noName, no, title, description);
         await sleepUntil(() => !Popup.curr);
+        await p.completion;
         return p.choice;
     }
 
@@ -4727,7 +4730,8 @@ navigator.vibrate(50);
     async numberPopup(v, min, max, callback, title, description) {
         let p = new NumberValuePopup(v, min, max, callback, title, description);
         await sleepUntil(() => !NumberValuePopup.curr);
-        return parseInt(p.value);
+        await p.completion;
+        return Number(p.value);
     }
 
     async startDeckSorter(cards, player, action, title, bottomAllowed = false) {
@@ -5022,7 +5026,7 @@ navigator.vibrate(50);
             if (game.isPvP() && card.holder.tag === player_op.tag) {
                 rows = [3, 4, 5];
             }
-            for (i of rows) {
+            for (const i of rows) {
                 let r = board.row[i];
                 if (r.effects.horn > 0) {
                     r.elem.classList.add("row-selectable");
@@ -5042,7 +5046,7 @@ navigator.vibrate(50);
             if (game.isPvP() && card.holder.tag === player_op.tag) {
                 rows = [3, 4, 5];
             }
-            for (i of rows) {
+            for (const i of rows) {
                 let r = board.row[i];
                 if (r.isShielded() || !r.canBeScorched()) {
                     r.elem.classList.add("noclick");
@@ -5062,7 +5066,7 @@ navigator.vibrate(50);
             if (game.isPvP() && card.holder.tag === player_op.tag) {
                 rows = [3, 4, 5];
             }
-            for (i of rows) {
+            for (const i of rows) {
                 let r = board.row[i];
                 if (r.containsCardByKey("spe_dimeritium_shackles") || r.isShielded()) {
                     r.elem.classList.add("noclick");
@@ -5098,9 +5102,11 @@ navigator.vibrate(50);
     // Make UI enter a mode where the player can re-arrange the cards on one side of the board (the one associated to the provided player)
     // In this mode, when a player clicks a card, it displays the preview
     // When the player clicks a row when a preview is displayed, move the card there (unless it was already there) and decrease remaining moves by one
-    enableBoardRearrangement(player,moves) {
+    async enableBoardRearrangement(player,moves) {
         if (this.underRearrangement)
             return;
+        if (moves < 1 || !player.getAllRowCards().some(c => c.isUnit() || c.hero)) return;
+        const done = new Promise(resolve => { this._arrangementDone = resolve; });
         this.underRearrangement = true;
         this.updateArrangementCounter(moves);
         this.setSelectable(null, false);
@@ -5124,6 +5130,40 @@ navigator.vibrate(50);
         }
         ui.helper.showMessage("Select cards on the board to re-arrange.");
         this.enablePlayer(true);
+        await done;
+    }
+
+    async finishBoardRearrangement(manual = false) {
+        if (!this.underRearrangement) return;
+        this.underRearrangement = false;
+        this.updateArrangementCounter(0);
+        this.hidePreview();
+        this.lastRow = null;
+        this.helper.hide();
+        const resolve = this._arrangementDone;
+        this._arrangementDone = null;
+        if (resolve) resolve();
+    }
+
+    // Await a board target without removing the leader or minting another turn.
+    async selectAbilityTarget(card, player) {
+        const abilities = card.abilities || [];
+        const hasTarget = abilities.includes('alzur_maker')
+            ? player.getAllRowCards().some(c => c.isUnit())
+            : abilities.some(a => a === 'meve_princess' || a === 'carlo_varese')
+                ? !game.scorchCancelled && player.opponent().getAllRows().some(r => !r.isShielded() && r.canBeScorched())
+                : abilities.includes('cyrus_hemmelfart')
+                    ? player.opponent().getAllRows().some(r => !r.isShielded() && !r.containsCardByKey('spe_dimeritium_shackles'))
+                    : true;
+        if (!hasTarget) { this.enablePlayer(true); return false; }
+        const done = new Promise(resolve => { player.endturn_action = async () => {
+            player.endturn_action = null;
+            resolve();
+        }; });
+        this.showPreviewVisuals(card);
+        this.enablePlayer(true);
+        this.setSelectable(card, true);
+        await done;
     }
 
     updateArrangementCounter(cnt) {
@@ -5137,9 +5177,12 @@ navigator.vibrate(50);
         }
     }
 
-    enableCardPowerEdit(player) {
+    async enableCardPowerEdit(player, maxPower = 999) {
         if (this.underCardPowerEdit || !player.capabilities["cardEdit"] || player.capabilities["cardEdit"] < 1)
             return;
+        if (!player.getAllRowCards().some(c => c.isUnit() || c.hero)) return;
+        const done = new Promise(resolve => { this._powerEditDone = resolve; });
+        this._powerEditMax = maxPower;
         this.underCardPowerEdit = true;
         this.setSelectable(null, false);
         let rows = (player === player_op) ? board.row.slice(0, 3) : board.row.slice(3);
@@ -5159,18 +5202,16 @@ navigator.vibrate(50);
                 row.cards.forEach(c => c.elem.classList.add("noclick"));
             }
         }
-        // Prevent the end of turn while selecting cards
-        player.endturn_action = async () => {
-            player.endturn_action = null;
-        }
+        // The lifecycle effect awaits this interaction; it does not end the turn.
         ui.helper.showMessage("Select a card on your side of the board.");
         this.enablePlayer(true);
+        await done;
     }
 
     async editCardPower(card) {
         ui.helper.hide();
-        let newValue = await this.numberPopup(card.power, 0, 999, null, "Select a new base power", "Select the new base power (before other effects) for the selected card. Currently: " + String(card.power));
-        if (!card.originalBasePower)
+        let newValue = await this.numberPopup(Math.min(card.power, this._powerEditMax), 0, this._powerEditMax, null, "Select a new base power", "Select the new base power (before other effects) for the selected card. Currently: " + String(card.power));
+        if (card.originalBasePower == null)
             card.originalBasePower = card.basePower;
         card.basePower = newValue;
         card.temporaryPower = true;
@@ -5179,7 +5220,10 @@ navigator.vibrate(50);
         this.preview.classList.add("hide");
         this.previewCard = null;
         card.holder.hand.cards.forEach(c => c.elem.classList.remove("noclick"));
-        card.holder.endTurn(true);
+        card.currentLocation?.updateScore();
+        const resolve = this._powerEditDone;
+        this._powerEditDone = null;
+        if (resolve) resolve();
     }
 }
 
@@ -5189,7 +5233,8 @@ var fimC = false;
 // Clicking the middle card performs the action on that card "count" times
 // Clicking adejacent cards shifts the menu to focus on that card
 class Carousel {
-    constructor(container, count, action, predicate, bSort, bExit = false, title) {
+    constructor(container, count, action, predicate, bSort, bExit = false, title, bRedraw = false) {
+        this.completion = new Promise((resolve,reject) => { this._resolveCompletion=resolve; this._rejectCompletion=reject; });
         if (count <= 0 || !container || !action || container.cards.length === 0)
             return;
         this.container = container;
@@ -5203,6 +5248,20 @@ class Carousel {
         this.title = title;
         this.cancelled = false;
         this.selection = [];
+        // v1.3.7: store selected card identities, not mutable array indices.
+        // Multi-select choices are removed from the visible candidate set immediately
+        // and committed in deterministic order when the carousel closes.
+        this.selectionCards = [];
+        // Mulligan must be an explicit carousel mode. Older code inferred redraw
+        // behaviour from the visible title text, which is brittle when another
+        // notification/carousel changes the label or for special leaders whose
+        // title does not contain the word "redraw".
+        this.bRedraw = !!bRedraw;
+        this.totalCount = count;
+        this.busy = false;
+        // v1.3.8: true while final multi-select actions are being committed.
+        // Carousel.curr remains owned until this phase is complete.
+        this.committing = false;
 
         if (!Carousel.elem) {
             Carousel.elem = document.getElementById("carousel");
@@ -5217,6 +5276,22 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
                     } catch (err) { }
                 }
             });
+            // v1.3.4: mouse-wheel navigation for every card-selection carousel.
+            // Listen on the carousel itself so normal page scrolling is untouched.
+            // During an atomic redraw mutation (`busy`) we ignore wheel input until
+            // the hand/deck and indices have been rebuilt.
+            Carousel.elem.addEventListener("wheel", function (e) {
+                const curr = Carousel.curr;
+                if (!curr || curr.busy || Carousel.elem.classList.contains("hide")) return;
+                const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+                if (!delta) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const now = Date.now();
+                if (curr._lastWheelAt && now - curr._lastWheelAt < 55) return;
+                curr._lastWheelAt = now;
+                curr.shift(e, delta > 0 ? 1 : -1);
+            }, { passive: false });
           }
         this.elem = Carousel.elem;
         document.getElementsByTagName("main")[0].classList.remove("noclick");
@@ -5229,12 +5304,13 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
 
     // Initializes the current Carousel
     start() {
-        if (!this.elem)
-            return;
+        if (!this.elem) { this._resolveCompletion(); return; }
         this.indices = this.container.cards.reduce((a, c, i) => (!this.predicate || this.predicate(c)) ? a.concat([i]) : a, []);
 
-        if (this.indices.length <= 0)
+        if (this.indices.length <= 0) {
+            Carousel.setCurrent(this);
             return this.exit();
+        }
         if (this.bSort)
             this.indices.sort((a, b) => Card.compare(this.container.cards[a], this.container.cards[b]));
 
@@ -5273,50 +5349,100 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
         try {
             (event || window.event).stopPropagation();
         } catch (err) { }
-        // In case of multiple selections, we only do action if not already selected
-        if (this.selection.indexOf(this.indices[this.index]) < 0) {
-            var label = document.getElementById("carousel_label");
-            if (label.innerText.indexOf("redraw") > -1 && label.className.indexOf("hide") == -1) {
+        // v1.3.7: every selection is atomic from the UI's point of view. This
+        // prevents double-click/re-entrancy and makes multi-select visibly consume
+        // one candidate at a time. Redraw still mutates its real container now;
+        // ordinary multi-select only mutates the carousel's candidate view until
+        // all picks are complete (or the user exits early).
+        if (this.busy) return;
+        const selectedIndex = this.indices[this.index];
+        if (!Number.isInteger(selectedIndex)) return;
+        const selectedCard = this.container?.cards?.[selectedIndex];
+        if (!selectedCard) return;
+
+        this.busy = true;
+        try {
+            if (this.bRedraw) {
                 tocar("redraw", false);
-            } else {
-                this.selection.push(this.indices[this.index]);
-            }
-            --this.count;
-            if (this.isLastSelection())
-                this.elem.classList.add("hide");
-            if (this.count <= 0)
-                ui.enablePlayer(false);
-            // For redraw, we run the action right away
-            if (label.innerText.indexOf("redraw") > -1 && label.className.indexOf("hide") == -1)
-                await this.action(this.container, this.indices[this.index]);
-            if (this.isLastSelection() && !this.cancelled) {
-                this.exit();
-                this.selection.map(async s => await this.action(this.container, s));
-                this.selection = [];
+                --this.count;
+                if (this.count <= 0) ui.enablePlayer(false);
+                await this.action(this.container, selectedIndex);
+                // Rebuild after the mutation before deciding whether any valid
+                // choices remain. This also covers abilities where the requested
+                // count is larger than the filtered candidate pool.
+                this.update();
+                if ((this.count <= 0 || this.indices.length === 0) && !this.cancelled) {
+                    this.elem.classList.add("hide");
+                    this.exit();
+                    return;
+                }
                 return;
             }
 
-        } else {
-            // If already selected, remove from selection
-            this.selection.splice(this.selection.indexOf(this.indices[this.index]), 1);
-            this.count++;
+            // Identity-based selection: array positions may change after the first
+            // committed action, but the Card object remains stable.
+            if (this.selectionCards.includes(selectedCard)) return;
+            this.selectionCards.push(selectedCard);
+            this.selection.push(selectedIndex); // legacy/debug mirror only
+            --this.count;
+
+            // Give immediate visual feedback, then remove the card from this
+            // carousel's candidate set. The real game zone is intentionally not
+            // changed until commit below.
+            const middle = this.previews && this.previews[2];
+            if (middle) middle.classList.add("selection");
+            await sleep(70);
+
+            const remainingCandidates = this.container.cards.reduce((n, c) =>
+                n + (((!this.predicate || this.predicate(c)) && !this.selectionCards.includes(c)) ? 1 : 0), 0);
+            if ((this.count <= 0 || remainingCandidates === 0) && !this.cancelled) {
+                await this.commitSelections();
+                return;
+            }
+
+            this.update();
+        } finally {
+            this.busy = false;
         }
-        this.update();
     }
 
     // Called by client to exit out of the current Carousel if allowed. Enables player interraction.
-    cancel() {
-        if (!fimC) {
-            fimC = true;
-            tocar("discard", false);
-            lCard = null;
-            exibindo_lider = false;
-            if (this.bExit) {
-                this.cancelled = true;
-                this.exit();
+    async commitSelections() {
+        if (this.committing || this.completed) return;
+        this.committing = true;
+        const picks = this.selectionCards.slice();
+        try {
+            // Publish the frozen selection before an action can open a nested
+            // decision. Release only the visible UI; completion stays pending.
+            if (this.action.prepare) await this.action.prepare(this.container, picks);
+            this.releaseUI();
+            for (const pickedCard of picks) {
+                const currentIndex = this.container?.cards?.indexOf(pickedCard);
+                if (currentIndex < 0) throw new Error('Selected card left its container before commit');
+                await this.action(this.container, currentIndex);
             }
-            ui.enablePlayer(true);
+            this.completed = true;
+            this._resolveCompletion();
+        } catch (error) {
+            this.completed = true;
+            this._rejectCompletion(error);
+        } finally {
+            this.selection = [];
+            this.selectionCards = [];
+            this.committing = false;
         }
+    }
+
+    async cancel() {
+        if (this.busy || this.committing || this.completed || !this.bExit) return;
+        fimC = true;
+        tocar('discard', false);
+        lCard = null;
+        exibindo_lider = false;
+        this.cancelled = true;
+        if (this.bRedraw) this.exit();
+        else await this.commitSelections();
+        ui.enablePlayer(true);
     }
 
     // Returns true if there are no more cards to view or select
@@ -5326,7 +5452,11 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
 
     // Updates the visuals of the current selection of cards
     update() {
-        this.indices = this.container.cards.reduce((a, c, i) => (!this.predicate || this.predicate(c)) ? a.concat([i]) : a, []);
+        // v1.3.7: selected multi-select cards disappear from the candidate list
+        // immediately without mutating the underlying gameplay container.
+        this.indices = this.container.cards.reduce((a, c, i) =>
+            (!this.predicate || this.predicate(c)) &&
+            (this.bRedraw || !this.selectionCards.includes(c)) ? a.concat([i]) : a, []);
         if (this.index >= this.indices.length)
             this.index = this.indices.length - 1;
         for (let i = 0; i < this.previews.length; i++) {
@@ -5336,7 +5466,7 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
                 getPreviewElem(this.previews[i], card);
                 this.previews[i].classList.remove("hide");
                 this.previews[i].classList.remove("noclick");
-                if (this.selection.indexOf(this.indices[curr]) >= 0)
+                if (this.selectionCards.includes(card))
                     this.previews[i].classList.add("selection");
                 else
                     this.previews[i].classList.remove("selection");
@@ -5347,18 +5477,29 @@ if (Carousel.elem && Carousel.elem.children.length > 0) {
                 this.previews[i].classList.remove("selection");
             }
         }
-        ui.setDescription(this.container.cards[this.indices[this.index]], this.desc);
+        const focused = this.indices.length > 0 && this.index >= 0
+            ? this.container.cards[this.indices[this.index]] : null;
+        if (focused) ui.setDescription(focused, this.desc);
+        else if (this.desc) this.desc.classList.add("hide");
     }
 
-    // Clears and quits the current carousel
-    exit() {
-        for (let x of this.previews) {
-            x.style.backgroundImage = "";
-            x.classList.remove("selection");
+    releaseUI() {
+        if (Carousel.curr !== this) return;
+        for (const x of this.previews) {
+            x.style.backgroundImage = '';
+            x.classList.remove('selection');
         }
-        this.elem.classList.add("hide");
+        this.elem.classList.add('hide');
         Carousel.clearCurrent();
         ui.quitCarousel();
+    }
+
+    // Redraw/empty carousels have no deferred gameplay actions.
+    exit() {
+        if (this.committing) return;
+        this.releaseUI();
+        this.completed = true;
+        this._resolveCompletion();
     }
 
     // Statically sets the current carousel
@@ -5403,17 +5544,21 @@ class Popup {
 
     // Called when client selects the positive aciton
     selectYes() {
-        this.clear();
+        if (this._submitted) return false;
+        this._submitted = true;
         this.choice = true;
-        this.yes(this);
+        this.completion = Promise.resolve().then(() => this.yes(this));
+        this.clear();
         return true;
     }
 
     // Called when client selects the negative option
     selectNo() {
-        this.clear();
+        if (this._submitted) return false;
+        this._submitted = true;
         this.choice = false;
-        this.no(this);
+        this.completion = Promise.resolve().then(() => this.no(this));
+        this.clear();
         return false;
     }
 
@@ -5428,6 +5573,8 @@ class Popup {
 class NumberValuePopup {
     constructor(value, min=0, max=999, callback, header, description) {
         this.callback = callback ? callback : () => { };
+        this.min = Number(min);
+        this.max = Number(max);
         this.choice = false;
 
         this.elem = document.getElementById("number-popup");
@@ -5459,10 +5606,12 @@ class NumberValuePopup {
 
     // Called when client confirms value
     done() {
-        this.value = this.numberElem.value;
-        if (!isNaN(this.value) && this.value != "") {
+        this.value = Number(this.numberElem.value);
+        if (this.numberElem.value.trim() !== '' && Number.isInteger(this.value) && this.value >= this.min && this.value <= this.max) {
+            if (this._submitted) return false;
+            this._submitted = true;
+            this.completion = Promise.resolve().then(() => this.callback(this));
             this.clear();
-            this.callback(this);
             return true;
         }
         
@@ -5696,13 +5845,26 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
             ui.player1DeckTitle = this.me_deck_title;
         };
 
-        document.getElementById("start-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(1); }, false);
-        document.getElementById("start-ai-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(2); }, false);
-        document.getElementById("start-pvp-game").addEventListener("click", () => { actualizartituloporid(); this.startNewGame(3); }, false);
+        // v1.1.0: Start game means the normal AI start in Computer mode,
+        // but acts as Online Ready in Friend mode. This lets both players
+        // Customize and then start the next match without reopening the lobby.
+        const startGameButton = document.getElementById("start-game");
+        startGameButton.addEventListener("click", () => {
+            actualizartituloporid();
+            if (window.GwentPlayMode === "friend") {
+                if (window.GwentOnline) window.GwentOnline.toggleReadyFromDeckBuilder();
+                return;
+            }
+            this.startNewGame(1);
+        }, false);
 
-        let onlineBtn = document.getElementById("start-online-game");
-        if (onlineBtn)
-            onlineBtn.addEventListener("click", () => { if (typeof Lobby !== "undefined") Lobby.show(); }, false);
+        const onlineButton = document.getElementById("start-pvp-game");
+        onlineButton.addEventListener("click", () => {
+            actualizartituloporid();
+            if (window.GwentPlayMode === "friend" && window.GwentOnline) {
+                window.GwentOnline.openLobby();
+            }
+        }, false);
 
 
         window.addEventListener("keydown", function (e) {
@@ -5712,7 +5874,13 @@ document.getElementById("save-internal-deck").addEventListener("click", () => th
                         try {
                             Carousel.curr.cancel();
                         } catch (err) { }
-                        if (isLoaded && iniciou) dm.startNewGame();
+                        if (isLoaded && iniciou) {
+                            if (window.GwentPlayMode === "friend") {
+                                if (window.GwentOnline) window.GwentOnline.toggleReadyFromDeckBuilder();
+                            } else {
+                                dm.startNewGame(1);
+                            }
+                        }
                         break;
                     case 88:
                         dm.selectLeader();
@@ -6073,10 +6241,6 @@ makePreview(index, num, container_elem, cards) {
             // AI vs AI
             player_me = new Player(0, "Player 1", me_deck, true);
             player_op = new Player(1, "Player 2", this.start_op_deck, true);
-        } else if (game.mode === 4) {
-            // Online PvP — both non-AI; remote player gets ControllerRemote in constructor
-            player_me = new Player(0, "Player 1", me_deck, false);
-            player_op = new Player(1, "Player 2", this.start_op_deck, false);
         } else {
             // PVP
             player_me = new Player(0, "Player 1", me_deck, false);
@@ -7109,6 +7273,7 @@ function isString(s) {
 
 // Returns a random integer in the range [0,n)
 function randomInt(n) {
+    if (window.GwentOnline && GwentOnline.active) return GwentOnline.randomInt(n);
     return Math.floor(Math.random() * n);
 }
 
@@ -7308,18 +7473,27 @@ window.onload = function () {
     dimensionar();
     playingOnline = window.location.href == "https://randompianist.github.io/gwent-classic-v2.0/";
     document.getElementById("load_text").style.display = "none";
-    document.getElementById("button_start").style.display = "inline-block";
+    document.getElementById("play-mode-buttons").style.display = "flex";
     document.getElementById("deck-customization").style.display = "";
     document.getElementById("toggle-music").style.display = "";
     document.getElementsByTagName("main")[0].style.display = "";
-    document.getElementById("button_start").addEventListener("click", function () {
-if (typeof window !== "undefined" && window.Website2APK && typeof window.Website2APK.vibrate === "function") {
-window.Website2APK.vibrate(60); 
-		} else if (navigator.vibrate) {
-			navigator.vibrate(60);
-		}
+
+    const enterMode = function(mode) {
+        window.GwentPlayMode = mode;
+        document.body.dataset.playMode = mode;
+        if (typeof window !== "undefined" && window.Website2APK && typeof window.Website2APK.vibrate === "function") {
+            window.Website2APK.vibrate(60);
+        } else if (navigator.vibrate) {
+            navigator.vibrate(60);
+        }
+        if (window.GwentOnline && typeof window.GwentOnline.applyPlayMode === "function") {
+            window.GwentOnline.applyPlayMode(mode);
+        }
         inicio();
-    });
+    };
+
+    document.getElementById("button_start_computer").addEventListener("click", function () { enterMode("computer"); });
+    document.getElementById("button_start_friend").addEventListener("click", function () { enterMode("friend"); });
     isLoaded = true;
 }
 

@@ -5,7 +5,7 @@ var factions = {
         name: "Northern Realms",
         factionAbility: player => game.roundStart.push(async () => {
             if (game.roundCount > 1 && game.roundHistory[game.roundCount - 2].winner !== player) {
-                player.deck.draw(player.hand);
+                await player.deck.draw(player.hand);
                 await ui.notification("north", 1200);
             }
             return false;
@@ -82,14 +82,26 @@ var factions = {
         name: "Scoia'tael",
         factionAbility: player => game.roundStart.push(async () => {
             let notif = "";
-            if (!game.isPvP() && player === player_me && !(player.controller instanceof ControllerAI)) {
+            if (window.GwentOnline && GwentOnline.active) {
+                if (player === player_me) {
+                    GwentOnline._suppressPopupWire = true;
+                    try {
+                        await ui.popup("Go First [E]", () => game.currPlayer = player, "Let Opponent Start [Q]", () => game.currPlayer = player.opponent(), "Would you like to go first?", "The Scoia'tael faction perk allows you to decide each round who will get to go first.");
+                    } finally { GwentOnline._suppressPopupWire = false; }
+                    GwentOnline.send({t:"first-choice", who:GwentOnline.roleOfPlayer(game.currPlayer)});
+                } else {
+                    const m = await GwentOnline.next("first-choice");
+                    game.currPlayer = GwentOnline.playerOf(m.who);
+                }
+                notif = game.currPlayer.tag + "-first";
+            } else if (!game.isPvP() && player === player_me && !(player.controller instanceof ControllerAI)) {
                 await ui.popup("Go First [E]", () => game.currPlayer = player, "Let Opponent Start [Q]", () => game.currPlayer = player.opponent(), "Would you like to go first?", "The Scoia'tael faction perk allows you to decide each round who will get to go first.");
                 notif = game.currPlayer.tag + "-first";
             } else if (game.isPvP()) {
                 await ui.popup("Player 1 first [E]", () => game.currPlayer = player_me, "Player 2 first [Q]", () => game.currPlayer = player_op, "Who should go first?", "The Scoia'tael faction perk allows you to decide each round who will get to go first.");
                 notif = game.currPlayer.tag + "-first";
             } else if (player.controller instanceof ControllerAI) {
-                if (Math.random() < 0.5) {
+                if ((window.GwentOnline && GwentOnline.active ? GwentOnline.random() : Math.random()) < 0.5) {
                     game.currPlayer = player;
                     notif = "scoiatael";
                 } else {
@@ -116,7 +128,7 @@ var factions = {
             if (game.roundCount != 3)
                 return false;
             await ui.notification("skellige-" + player.tag, 1200);
-            await Promise.all(player.grave.findCardsRandom(c => c.isUnit(), 2).map(c => board.toRow(c, player.grave)));
+            await resolveInOrder(player.grave.findCardsRandom(c => c.isUnit(), 2), c => board.toRow(c, player.grave));
             return true;
         }),
         description: "At the start of round three, randomly play 2 cards from the graveyard onto the battlefield.",
@@ -162,10 +174,10 @@ var factions = {
                 player.deck.addCard(newCard);
                 //await board.addCardToRow(newCard, targetCard.currentLocation, player);
                 if (player.controller instanceof ControllerAI) {
-                    newCard.autoplay(player.deck);
+                    await newCard.autoplay(player.deck);
                 } else {
                     // let player select where to play the card
-                    player.selectCardDestination(newCard, player.deck);
+                    await player.selectCardDestination(newCard, player.deck);
                 }
             }
         },
@@ -197,15 +209,17 @@ var factions = {
     },
     lyria_rivia: {
         name: "Lyria & Rivia",
-        factionAbility: player => {
+        factionAbility: async player => {
             let card = new Card("spe_lyria_rivia_morale", card_dict["spe_lyria_rivia_morale"], player);
-            card.removed.push(() => setTimeout(() => card.holder.grave.removeCard(card), 2000));
+            card.banishFromGrave = true;
             card.placed.push(async () => await ui.notification("lyria_rivia", 1200));
-            player.endTurnAfterAbilityUse = false;
-            ui.showPreviewVisuals(card);
-            ui.enablePlayer(true);
-            if (!(player.controller instanceof ControllerAI))
-                ui.setSelectable(card, true);
+            if (!(player.controller instanceof ControllerAI)) {
+                if (await ui.selectAbilityTarget(card, player) === false) return false;
+            } else {
+                player.endTurnAfterAbilityUse = false;
+                ui.showPreviewVisuals(card);
+                ui.enablePlayer(true);
+            }
         },
         activeAbility: true,
         abilityUses: 1,
@@ -254,13 +268,13 @@ var factions = {
                         card: c.cards[i]
                     }), c => c.isUnit(), true);
                 }
-                await Promise.all(respawns.map(async wrapper => {
+                await resolveInOrder(respawns, async wrapper => {
                     let res = wrapper.card;
                     grave.removeCard(res);
                     grave.addCard(res);
                     await res.animate("medic");
                     await res.autoplay(grave);
-                }));
+                });
                 await ui.notification("zerrikania", 1200);
             }
             return false;
@@ -426,7 +440,7 @@ tocar("game_buy", false);
                         if (play) {
                             if (!(player.controller instanceof ControllerAI)) {
                                 let choiceDone = false;
-                                player.selectCardDestination(card, player.deck, async () => {
+                                await player.selectCardDestination(card, player.deck, async () => {
                                     choiceDone = true;
                                     if (typeof ui.enablePlayer === "function") ui.enablePlayer(true);
                                 });
@@ -496,8 +510,9 @@ tocar("game_buy", false);
                     c.noRemove = true; // Stays on the board until the end
                     r.special.addCard(c);
                 });
-                // Draws an additional card
-                player.deck.draw(player.hand);
+                // Draws an additional card. Wait for the hand mutation to finish
+                // before the opening mulligan can start.
+                await player.deck.draw(player.hand);
                 player.playedLeaders = [player.leader.key];
                 return false;
             });
@@ -558,7 +573,7 @@ tocar("game_buy", false);
 			
 			if (weatherCards.length === 0) {
 				await ui.notification("ofir", 1200);
-				return; // No weather cards in deck
+				return false; // No weather cards in deck
 			}
 			
 			await ui.notification("ofir", 1200);
@@ -578,25 +593,14 @@ tocar("game_buy", false);
 					await bestCard.autoplay(player.deck);
 				}
 			} else {
-				// Player: Let them choose from weather cards
-				player.endTurnAfterAbilityUse = false;
-				await ui.queueCarousel(player.deck, 1, async (container, index) => {
-					const selectedCard = container.cards[index];
-					if (selectedCard && selectedCard.faction === "weather") {
-					
-						player.endTurnAfterAbilityUse = true;
-						
-						
-						await selectedCard.autoplay(player.deck);
-						
-						
-						if (typeof board !== "undefined" && board.updateScore) {
-							board.updateScore();
-						}
-					} else {
-						player.endTurnAfterAbilityUse = true;
-					}
-				}, c => c.faction === "weather", false, true, "Choose a weather card to play");
+                // Choosing/cancelling finishes before playing the card or ending
+                // the turn. An empty choice preserves the once-per-game use.
+                let selectedCard = null;
+                await ui.queueCarousel(player.deck, 1, (container, index) => {
+                    selectedCard = container.cards[index];
+                }, c => c.faction === "weather", false, true, "Choose a weather card to play");
+                if (!selectedCard) return false;
+                await selectedCard.autoplay(player.deck);
 			}
 		},
 		activeAbility: true,
